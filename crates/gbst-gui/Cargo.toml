@@ -1,0 +1,25 @@
+[package]
+name = "gbst-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "gbst"
+path = "src/main.rs"
+
+[dependencies]
+gbst-core = { path = "../gbst-core" }
+gbst-adb = { path = "../gbst-adb" }
+anyhow.workspace = true
+iced.workspace = true
+image.workspace = true
+chrono.workspace = true
+open.workspace = true
+sys-locale.workspace = true
+ureq.workspace = true
+serde_json.workspace = true
+semver.workspace = true
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"

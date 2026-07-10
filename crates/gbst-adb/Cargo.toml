@@ -1,0 +1,10 @@
+[package]
+name = "gbst-adb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gbst-core = { path = "../gbst-core" }
+adb_client.workspace = true
+rsa.workspace = true

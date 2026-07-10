@@ -1,92 +1,92 @@
 # GBST
 
-**GBST (Google Basic Service Tool)** is a desktop utility for Lenovo Android tablets.  
-It provides a guided USB ADB workflow to prepare, install, repair, and refresh Google Basic Service functionality on supported Lenovo devices.
+**GBST is designed to help Lenovo tablet users set up Google Basic Services more easily and conveniently.**
 
-GBST was developed with reference to LPMBox.  
-Reference: https://github.com/dwas-KR/LPMBox/tree/main
+Instead of manually checking device information, preparing APK files, or running complex ADB commands, users can complete the entire process through a simple dashboard-based interface.
 
-## Overview
+<img width="1650" height="632" alt="GBST_" src="https://github.com/user-attachments/assets/c7e9a5c4-d9cb-4f91-bea6-92204b0299da" />
 
-GBST is designed to make Google Basic Service setup easier for Lenovo tablet users.  
-Instead of manually checking device information, preparing APK files, and following complex ADB steps, users can complete the process through a simple dashboard-based interface.
+GBST was developed with reference to LPMBox.
 
-## Main Features
+Reference project:
+https://github.com/dwas-KR/LPMBox/tree/main
 
-- Lenovo tablet information display
-- Android version and ROM type display
-- Google Basic Service status check
-- Guided Google service install, repair, and update workflow
-- APK preparation and download progress popup
-- Task status indicator
-- Log management page
-- Settings page
-- Multilingual interface
-- Developer YouTube, feedback, and support links
+## Supported Languages
+
+* English (en) / 한국어 (ko) /[Русский (ru) / 日本語 (jp)
+* 繁體中文 (CN/TW) / Tiếng Việt (vi) / Ελληνικά (el) / हिन्दी (hi)
+* ქართული (ka) / Nederlands (nl) / العربية (ar) / Español (es)
 
 ## How to Use GBST
 
-1. Connect a Lenovo Android tablet to the PC with a USB data cable.
+1. Connect your Lenovo Android tablet to your PC using a USB data cable.
 2. Enable USB debugging on the tablet.
-3. Allow the USB debugging permission prompt when it appears.
-4. Open GBST and check the device information on the dashboard.
-5. Click **Start** in the **Google Service Install/Repair/Update** section.
+3. Allow the USB debugging authorization prompt when it appears.
+4. Launch GBST and check the connected device information on the dashboard.
+5. Click **Start** in the **Google Service Install, Repair, and Update** section.
 6. Wait while GBST prepares the required files and performs the guided workflow.
-7. Do not disconnect the tablet until the task status returns to standby or completion.
-8. Check the log page if you need to review the task result.
+7. Do not disconnect the tablet from the PC until the task status changes to standby or completed.
+8. Open the Log Management page to review the task results when necessary.
 
 ## Dashboard
 
-The dashboard shows the connected tablet information, including:
+The dashboard displays the following information about the connected tablet:
 
-- Model name
-- Android version
-- Manufacturer
-- ROM type
-- Google service status
+* Model name
+* Android version
+* Manufacturer
+* ROM type
+* Google service status
 
-It also provides quick access to:
+It also provides quick access to the following features:
 
-- Support the developer
-- Google service install/repair/update
-- Developer YouTube
+* Support the developer
+* Google service installation, repair, and update
+* Developer YouTube channel
 
 ## Sidebar Menu
 
-The sidebar provides quick navigation to the main areas of the app:
+The sidebar provides quick access to the main areas of the program:
 
-- **Dashboard**: View device status and start the main workflow.
-- **Google Task Start**: Start the Google Basic Service workflow.
-- **Log Management**: Review task logs.
-- **Settings**: Change language, check updates, open feedback, and access developer links.
+* **Dashboard:** View the connected device status and start the main workflow.
+* **Start Google Task:** Start the Google Basic Services installation, repair, and update workflow.
+* **Log Management:** Review task progress and result logs.
+* **Settings:** Change the language, check for program updates, submit feedback, and access developer links.
 
 ## Settings
 
-The settings page includes:
+The Settings page includes the following options:
 
-- Language selection
-- Developer YouTube link
-- Support link
-- Program update check
-- Feedback link
+* Language selection
+* Developer YouTube link
+* Support link
+* Program update check
+* Feedback link
 
-The selected language is saved and reused when GBST is opened again.
+The selected language is saved automatically and will remain active the next time GBST is launched.
 
 ## Logs
 
-GBST records task progress during the workflow.  
-Logs can help identify USB authorization problems, download issues, device detection problems, or workflow failures.
+GBST records the progress and results of each step while a task is running.
+
+The logs can help identify issues such as:
+
+* USB debugging authorization problems
+* File download issues
+* Device connection or detection problems
+* Errors that occur during the workflow
 
 ## Public Source Notice
 
-Some implementation details are intentionally not included in this public source release.  
-The following parts are redacted because they are part of the program's core implementation:
+Some implementation details are intentionally excluded from the public source release.
 
-- Google package remove/install/restore/enable/clear workflow
-- Update notification and update-control handling workflow
-- Remote APK catalog decoding and processing workflow
+The following components have been redacted because they are part of the program’s core implementation:
 
-Redacted sections are replaced with the following notice:
+* Google package removal, installation, restoration, activation, and data-clearing workflows
+* Update notifications and update-control workflows
+* Remote APK catalog decoding and processing workflows
+
+Redacted code sections are replaced with the following notice:
 
 ```text
 This code is part of the program's core implementation and has been commented out.
@@ -94,11 +94,20 @@ This code is part of the program's core implementation and has been commented ou
 
 ## Disclaimer
 
-GBST is an independent project and is not affiliated with Google, Lenovo, or any APK provider.  
-Use it only on devices you own or are authorized to manage.  
-The user is responsible for all actions performed on the device.
+GBST is an independently developed project and is not affiliated with, endorsed by, or officially associated with Google, Lenovo, or any APK provider.
+
+Use GBST only on devices that you own or are authorized to manage.
+
+The user is solely responsible for all actions performed on the device and any resulting consequences.
 
 ## License
 
-This project is licensed under **CC BY-NC-SA 4.0** unless stated otherwise.  
-Commercial use is not permitted without separate permission.
+> Components included with or used by GBST may be subject to their own licenses and distribution terms. Please review and comply with those terms separately.
+>
+> This work is licensed under the
+> **Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License (CC BY-NC-SA 4.0)**.
+>
+> For full details, see the `LICENSE` file or visit:
+> https://creativecommons.org/licenses/by-nc-sa/4.0/
+>
+> [![CC BY-NC-SA 4.0][cc-by-nc-sa-image]][cc-by-nc-sa]

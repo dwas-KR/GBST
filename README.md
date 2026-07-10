@@ -20,13 +20,19 @@ https://github.com/dwas-KR/LPMBox/tree/main
 ## How to Use GBST
 
 1. Connect your Lenovo Android tablet to your PC using a USB data cable.
-2. Enable USB debugging on the tablet.
-3. Allow the USB debugging authorization prompt when it appears.
-4. Launch GBST and check the connected device information on the dashboard.
-5. Click **Start** in the **Google Service Install, Repair, and Update** section.
-6. Wait while GBST prepares the required files and performs the guided workflow.
-7. Do not disconnect the tablet from the PC until the task status changes to standby or completed.
-8. Open the Log Management page to review the task results when necessary.
+2. Enable USB debugging on the tablet:
+
+   * Open **Settings**.
+   * Select **About Tablet** at the bottom of the left-hand menu.
+   * Scroll down on the right and quickly tap **Software Version** 10 times.
+   * Developer mode is enabled when a developer notification appears.
+   * Select **General Settings** from the left-hand menu.
+   * Scroll to the bottom of the right-hand menu and open **Developer Options**.
+   * Enable **USB Debugging**.
+3. When the USB debugging authorization prompt appears on the tablet, tap **Allow**.
+4. Wait for GBST to finish downloading the required APK files.
+5. After the download is complete, click **Start** in the **Google Services Install/Repair/Update** section.
+6. Do not disconnect the tablet from the PC until the task is complete. Refer to the logs for detailed progress and results.
 
 ## Dashboard
 

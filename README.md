@@ -1,4 +1,4 @@
-# GBST
+# GBST (Google Basic Service Tool)
 
 **GBST is designed to help Lenovo tablet users set up Google Basic Services more easily and conveniently.**
 

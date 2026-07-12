@@ -6,7 +6,8 @@ Instead of manually checking device information, preparing APK files, or running
 
 <img width="1650" height="632" alt="GBST_" src="https://github.com/user-attachments/assets/c7e9a5c4-d9cb-4f91-bea6-92204b0299da" />
 
-GBST was developed with reference to LPMBox. 
+GBST was developed with reference to LPMBox.
+
 Reference project: https://github.com/dwas-KR/LPMBox/tree/main
 
 ## Supported Languages

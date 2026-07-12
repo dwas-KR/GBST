@@ -6,14 +6,40 @@ Instead of manually checking device information, preparing APK files, or running
 
 <img width="1650" height="632" alt="GBST_" src="https://github.com/user-attachments/assets/c7e9a5c4-d9cb-4f91-bea6-92204b0299da" />
 
+## APK Source and File Integrity
+
+The APK files used by GBST are obtained through the following process:
+
+1. The original APK files are downloaded from **APKMirror**.
+2. The downloaded files are stored on the developer's personal drive for reliable distribution.
+3. GBST downloads the required APK files from that drive during the installation, repair, or update workflow.
+
+The APK files provided through GBST are stored and distributed **without modification, patching, malware injection, or other alterations**.
+
+GBST does not rebuild, re-sign, or modify the original APK packages downloaded from APKMirror.
+
+Users who would like to independently verify the files may compare the GBST-provided APKs with the corresponding APKMirror downloads by checking:
+
+* Exact file size in bytes
+* Package name and version
+* APK certificate or signature
+* Cryptographic file hashes, such as SHA-256
+
+The download catalog used by GBST is available here:
+
+https://github.com/dwas-KR/GBST/blob/Download/GBST_apk.txt
+
+> APKMirror is the original source of the APK files. The developer's personal drive is used only as a distribution location for the unchanged files required by GBST.
+
 GBST was developed with reference to LPMBox.
 
 Reference project:
+
 https://github.com/dwas-KR/LPMBox/tree/main
 
 ## Supported Languages
 
-* English (en) / 한국어 (ko) /[Русский (ru) / 日本語 (jp)
+* English (en) / 한국어 (ko) / Русский (ru) / 日本語 (jp)
 * 繁體中文 (CN/TW) / Tiếng Việt (vi) / Ελληνικά (el) / हिन्दी (hi)
 * ქართული (ka) / Nederlands (nl) / العربية (ar) / Español (es)
 
@@ -86,7 +112,7 @@ The logs can help identify issues such as:
 
 Some implementation details are intentionally excluded from the public source release.
 
-The following components have been redacted because they are part of the program’s core implementation:
+The following components have been redacted because they are part of the program's core implementation:
 
 * Google package removal, installation, restoration, activation, and data-clearing workflows
 * Update notifications and update-control workflows
@@ -98,13 +124,17 @@ Redacted code sections are replaced with the following notice:
 This code is part of the program's core implementation and has been commented out.
 ```
 
+The exclusion of these implementation details does not change the APK source or file-integrity policy described above. The APK files distributed through GBST are unchanged copies of the corresponding files obtained from APKMirror.
+
 ## Disclaimer
 
-GBST is an independently developed project and is not affiliated with, endorsed by, or officially associated with Google, Lenovo, or any APK provider.
+GBST is an independently developed project and is not affiliated with, endorsed by, or officially associated with Google, Lenovo, APKMirror, or any other APK provider.
 
 Use GBST only on devices that you own or are authorized to manage.
 
 The user is solely responsible for all actions performed on the device and any resulting consequences.
+
+Although the developer states that the distributed APK files are not modified, users are encouraged to independently verify file hashes, signatures, versions, and file sizes before installation.
 
 ## License
 

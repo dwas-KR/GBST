@@ -6,6 +6,15 @@ Instead of manually checking device information, preparing APK files, or running
 
 <img width="1650" height="632" alt="GBST_" src="https://github.com/user-attachments/assets/c7e9a5c4-d9cb-4f91-bea6-92204b0299da" />
 
+GBST was developed with reference to LPMBox. 
+Reference project: https://github.com/dwas-KR/LPMBox/tree/main
+
+## Supported Languages
+
+* English (en) / 한국어 (ko) / Русский (ru) / 日本語 (jp)
+* 繁體中文 (CN/TW) / Tiếng Việt (vi) / Ελληνικά (el) / हिन्दी (hi)
+* ქართული (ka) / Nederlands (nl) / العربية (ar) / Español (es)
+
 ## APK Source and File Integrity
 
 The APK files used by GBST are obtained through the following process:
@@ -30,18 +39,6 @@ The download catalog used by GBST is available here:
 https://github.com/dwas-KR/GBST/blob/Download/GBST_apk.txt
 
 > APKMirror is the original source of the APK files. The developer's personal drive is used only as a distribution location for the unchanged files required by GBST.
-
-GBST was developed with reference to LPMBox.
-
-Reference project:
-
-https://github.com/dwas-KR/LPMBox/tree/main
-
-## Supported Languages
-
-* English (en) / 한국어 (ko) / Русский (ru) / 日本語 (jp)
-* 繁體中文 (CN/TW) / Tiếng Việt (vi) / Ελληνικά (el) / हिन्दी (hi)
-* ქართული (ka) / Nederlands (nl) / العربية (ar) / Español (es)
 
 ## How to Use GBST
 

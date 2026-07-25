@@ -3,7 +3,7 @@
 
 use gbst_adb::{DirectAdb, GoogleServiceAction};
 use gbst_core::apk_catalog::{ApkCatalog, REMOTE_APK_CATALOG_URL};
-use gbst_core::downloader::{download_apks_for_android, local_apks_from_download_dir};
+use gbst_core::downloader::download_apks_for_android;
 use gbst_core::language::{detect_initial_language, save_language, translate_runtime_text, LanguageOption};
 use gbst_core::model::{DashboardInfo, DeviceInfo};
 use gbst_core::paths;
@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 const WINDOW_WIDTH: f32 = 800.0;
 const WINDOW_HEIGHT: f32 = 600.0;
-const APP_DISPLAY_VERSION: &str = "1.0.0";
+const APP_DISPLAY_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const BODY_FONT: u32 = 15;
 const LOG_FONT: u32 = 12;
@@ -203,6 +203,8 @@ enum WorkerEvent {
     Log(String),
     DashboardLoaded(Result<DashboardInfo, String>),
     StartupPrepared(Result<DashboardInfo, String>),
+    ApkDownloadCompleted,
+    InstallFinished(Result<DashboardInfo, String>),
     Finished(Result<(), String>),
 }
 
@@ -425,7 +427,7 @@ impl App {
             }
             Message::OpenApkLinks => {
                 if let Err(err) = open::that(REMOTE_APK_CATALOG_URL) {
-                    self.push_log(format!("[APK] remote APK catalog 열기 실패: {err}"));
+                    self.push_log(format!("[APK] GitHub Base64 링크 열기 실패: {err}"));
                 }
                 Task::none()
             }
@@ -932,7 +934,11 @@ impl App {
 
         thread::spawn(move || {
             let result = prepare_startup_apk_download_flow(|line| {
+                let download_completed = is_apk_download_done_message(&line);
                 let _ = tx.send(WorkerEvent::Log(line));
+                if download_completed {
+                    let _ = tx.send(WorkerEvent::ApkDownloadCompleted);
+                }
             })
             .map_err(|err| err.to_string());
 
@@ -975,7 +981,7 @@ impl App {
         thread::spawn(move || {
             let result = run_install_flow(|line| { let _ = tx.send(WorkerEvent::Log(line)); })
                 .map_err(|err| err.to_string());
-            let _ = tx.send(WorkerEvent::Finished(result));
+            let _ = tx.send(WorkerEvent::InstallFinished(result));
         });
     }
 
@@ -1002,6 +1008,8 @@ impl App {
                 WorkerEvent::StartupPrepared(result) => {
                     self.busy = false;
                     self.worker_rx = None;
+                    self.apk_download_modal_message = None;
+                    self.apk_download_modal_completed_at = None;
                     match result {
                         Ok(info) => {
                             self.dashboard_info = info;
@@ -1012,6 +1020,10 @@ impl App {
                             self.push_log(format!("[GBST] APK 사전 다운로드 준비 실패: {user_error}"));
                         }
                     }
+                }
+                WorkerEvent::ApkDownloadCompleted => {
+                    self.apk_download_modal_message = None;
+                    self.apk_download_modal_completed_at = None;
                 }
                 WorkerEvent::DashboardLoaded(result) => match result {
                     Ok(info) => {
@@ -1028,6 +1040,26 @@ impl App {
                         self.push_log(format!("[Dashboard] 감지 실패: {err}"));
                     }
                 },
+                WorkerEvent::InstallFinished(result) => {
+                    self.busy = false;
+                    self.worker_rx = None;
+                    match result {
+                        Ok(info) => {
+                            self.dashboard_info = info;
+                            self.push_log("[GBST] 작업이 완료되었습니다.");
+                            if let Err(err) = self.save_gbst_log_to_file("완료") {
+                                self.push_log(format!("[Log] 작업 로그 자동 저장 실패: {err}"));
+                            }
+                        }
+                        Err(err) => {
+                            let user_error = clean_user_error(&err);
+                            self.push_log(format!("[GBST] 작업 실패: {user_error}"));
+                            if let Err(save_err) = self.save_gbst_log_to_file("실패") {
+                                self.push_log(format!("[Log] 작업 로그 자동 저장 실패: {save_err}"));
+                            }
+                        }
+                    }
+                }
                 WorkerEvent::Finished(result) => {
                     self.busy = false;
                     self.worker_rx = None;
@@ -1291,7 +1323,7 @@ impl App {
             .align_x(iced::Alignment::Center),
         )
         .width(Length::Fixed(260.0))
-        .height(Length::Fixed(150.0))
+        .height(Length::Fixed(210.0))
         .padding([18.0, 20.0])
         .style(lpm_nav_dashboard_update_popup_card_style);
 
@@ -1345,6 +1377,10 @@ fn normalize_log_line(raw: String) -> Option<(Option<String>, String)> {
 fn is_hidden_log_text(text: &str) -> bool {
     let trimmed = text.trim();
 
+    if trimmed.starts_with("[GBST] 작업 실패:") || trimmed.starts_with("[Error]") {
+        return false;
+    }
+
     trimmed.is_empty()
         || trimmed.contains("Failure")
         || trimmed.contains("[경고]")
@@ -1391,7 +1427,7 @@ where
     ));
 
     let android_major = device.android_major.value();
-    let catalog = ApkCatalog::load_from_remote_catalog(REMOTE_APK_CATALOG_URL, |line| on_log(line))?;
+    let catalog = ApkCatalog::load_from_github_base64(REMOTE_APK_CATALOG_URL, |line| on_log(line))?;
     let entries = catalog.entries_for_android(android_major)?;
     let _ = download_apks_for_android(android_major, &entries, |line| on_log(line))?;
 
@@ -1399,7 +1435,7 @@ where
     Ok(info)
 }
 
-fn run_install_flow<F>(mut on_log: F) -> Result<(), anyhow::Error>
+fn run_install_flow<F>(mut on_log: F) -> Result<DashboardInfo, anyhow::Error>
 where
     F: FnMut(String),
 {
@@ -1447,14 +1483,9 @@ where
     let operation_result = (|| -> Result<(), anyhow::Error> {
         let android_major = device.android_major.value();
 
-        let local_apks = match local_apks_from_download_dir(android_major) {
-            Ok(apks) => apks,
-            Err(_) => {
-                let catalog = ApkCatalog::load_from_remote_catalog(REMOTE_APK_CATALOG_URL, |line| on_log(line))?;
-                let entries = catalog.entries_for_android(android_major)?;
-                download_apks_for_android(android_major, &entries, |line| on_log(line))?
-            }
-        };
+        let catalog = ApkCatalog::load_from_github_base64(REMOTE_APK_CATALOG_URL, |line| on_log(line))?;
+        let entries = catalog.entries_for_android(android_major)?;
+        let local_apks = download_apks_for_android(android_major, &entries, |line| on_log(line))?;
         match adb.assess_google_services_from_downloaded_apks(&local_apks) {
             GoogleServiceAction::RepairRequired => {
                 on_log("[GBST] 기기에 Google Services가 정상적이지 않으므로 복구를 진행합니다.".to_string());
@@ -1478,7 +1509,45 @@ where
         }
     }
 
-    operation_result
+    operation_result?;
+
+    on_log("[Device] 설치된 Google Services APK 버전과 GBST 정보를 다시 조회합니다.".to_string());
+
+    let mut refreshed_info = None;
+    let mut last_refresh_error = None;
+
+    for attempt in 0..3 {
+        match adb.read_dashboard_info() {
+            Ok(info) => {
+                let is_normal = info.google_service_status == "정상";
+                refreshed_info = Some(info);
+                if is_normal || attempt == 2 {
+                    break;
+                }
+            }
+            Err(err) => {
+                last_refresh_error = Some(err);
+            }
+        }
+
+        thread::sleep(Duration::from_secs(1));
+    }
+
+    let info = refreshed_info.ok_or_else(|| {
+        anyhow::anyhow!(
+            "복구 완료 후 기기 정보 재조회 실패: {}",
+            last_refresh_error
+                .map(|err| err.to_string())
+                .unwrap_or_else(|| "알 수 없는 오류".to_string())
+        )
+    })?;
+
+    on_log(format!(
+        "[Device] GBST 기기 정보 재조회 완료, Google Services 상태: {}",
+        info.google_service_status
+    ));
+
+    Ok(info)
 }
 
 fn remove_downloaded_apk_folders<F>(mut on_log: F) -> Result<(), anyhow::Error>
@@ -1489,29 +1558,47 @@ where
 
     on_log("__SPINNER__|apk_cleanup|[APK] 다운로드한 파일 및 폴더 제거... │".to_string());
 
-    if apk_root.is_dir() {
-        for entry in fs::read_dir(&apk_root)? {
-            let path = entry?.path();
-            if path.is_dir() {
-                fs::remove_dir_all(path)?;
-            } else if path.is_file() {
+    fs::create_dir_all(&apk_root)?;
+    for android_dir in fs::read_dir(&apk_root)? {
+        let path = android_dir?.path();
+        if !path.is_dir() {
+            if path.is_file() && path.metadata()?.len() == 0 {
                 fs::remove_file(path)?;
+            }
+            continue;
+        }
+
+        for entry in fs::read_dir(path)? {
+            let file_path = entry?.path();
+            if !file_path.is_file() {
+                continue;
+            }
+
+            let file_name = file_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default();
+            if file_name.ends_with(".part") || file_path.metadata()?.len() == 0 {
+                fs::remove_file(file_path)?;
             }
         }
     }
-    fs::create_dir_all(&apk_root)?;
 
     on_log("__SPINNER__|apk_cleanup|[APK] 다운로드한 파일 및 폴더 제거 완료".to_string());
     Ok(())
 }
 
 fn clean_user_error(error: &str) -> String {
+    if error.contains("APK 다운로드 및 검증에 실패했습니다:") {
+        return error.to_string();
+    }
+
     if error.contains("다운로드 실패")
         || error.contains("status code 403")
         || error.contains("https://")
         || error.contains("http://")
     {
-        return "APK 다운로드에 실패했습니다. remote APK catalog 파일 또는 APK 다운로드 링크를 다시 확인해주세요.".to_string();
+        return "APK 다운로드에 실패했습니다. GitHub Base64 링크 파일 또는 해독된 APK 다운로드 링크를 다시 확인해주세요.".to_string();
     }
 
     if error.contains("Lenovo") || error.contains("레노버") {

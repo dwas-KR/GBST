@@ -85,6 +85,75 @@ pub fn apk_version_codes_from_dir(dir: &Path) -> BTreeMap<String, u64> {
     versions
 }
 
+
+pub fn apk_version_code_candidates_from_local_apks(
+    apks: &[LocalApk],
+) -> BTreeMap<String, Vec<u64>> {
+    let mut versions = BTreeMap::new();
+    for apk in apks {
+        if let Ok(info) = read_apk_manifest_info(&apk.path) {
+            let package = if info.package.trim().is_empty() {
+                apk.package.clone()
+            } else {
+                info.package
+            };
+
+            if let Some(version_code) = info.version_code {
+                insert_version_candidate(&mut versions, package, version_code);
+            }
+        }
+    }
+    versions
+}
+
+pub fn apk_version_code_candidates_from_dir(
+    dir: &Path,
+) -> BTreeMap<String, Vec<u64>> {
+    let mut versions = BTreeMap::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return versions;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(ext) = path.extension().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if !ext.eq_ignore_ascii_case("apk") {
+            continue;
+        }
+
+        if let Ok(info) = read_apk_manifest_info(&path) {
+            let package = info.package.trim();
+            let Some(version_code) = info.version_code else {
+                continue;
+            };
+            if package.is_empty() {
+                continue;
+            }
+
+            insert_version_candidate(&mut versions, package.to_string(), version_code);
+        }
+    }
+
+    versions
+}
+
+fn insert_version_candidate(
+    versions: &mut BTreeMap<String, Vec<u64>>,
+    package: String,
+    version_code: u64,
+) {
+    let candidates = versions.entry(package).or_default();
+    if !candidates.contains(&version_code) {
+        candidates.push(version_code);
+        candidates.sort_unstable();
+    }
+}
+
 pub fn read_apk_manifest_info(path: &Path) -> std::io::Result<ApkManifestInfo> {
     let mut file = File::open(path)?;
     let mut apk_bytes = Vec::new();

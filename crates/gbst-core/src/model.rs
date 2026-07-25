@@ -53,7 +53,15 @@ pub struct DeviceInfo {
 }
 
 
-pub const GOOGLE_REQUIRED_PACKAGES: [&str; 0] = [];
+pub const GOOGLE_REQUIRED_PACKAGES: [&str; 7] = [
+    "com.google.android.gms",
+    "com.google.android.printservice.recommendation",
+    "com.google.android.onetimeinitializer",
+    "com.google.android.configupdater",
+    "com.google.android.partnersetup",
+    "com.google.android.gsf",
+    "com.android.vending",
+];
 
 #[derive(Debug, Clone)]
 pub struct DashboardInfo {
@@ -110,6 +118,11 @@ pub enum PlanStep {
     InstallApk {
         package: String,
         path: PathBuf,
+        policy: FailurePolicy,
+    },
+    InstallApkCandidates {
+        package: String,
+        paths: Vec<PathBuf>,
         policy: FailurePolicy,
     },
     RebootAndWait {

@@ -1,11 +1,16 @@
 use adb_client::usb::{find_all_connected_adb_devices, ADBUSBDevice};
 use adb_client::{ADBDeviceExt, RebootType};
+use gbst_core::apk_metadata::{
+    apk_version_code_candidates_from_dir, apk_version_code_candidates_from_local_apks,
+};
 use gbst_core::error::{GbstError, Result};
 use gbst_core::model::{
     AndroidMajor, DashboardInfo, DeviceInfo, FailurePolicy, InstallPlan, LocalApk, PlanStep,
+    GOOGLE_REQUIRED_PACKAGES,
 };
 use gbst_core::paths;
 use rsa::pkcs8::{EncodePrivateKey, LineEnding};
+use std::fs::File;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
 use std::path::{Path, PathBuf};
@@ -39,7 +44,7 @@ pub const ADB_UNAUTHORIZED_GUIDE: &str =
 const PREPARATION_LOG: &str =
     "[GBST] PC(노트북)에 파일 및 구성 요소 환경과 구글 서비스 설치, 복구, 업데이트를 준비합니다.";
 const DEVICE_CONNECT_PREP_LOG: &str = "[ADB] 기기에 연결할 준비합니다.";
-const CORE_REDACTED_NOTICE: &str = "This code is part of the program's core implementation and has been commented out.";
+const OTA_DISABLE_LOG: &str = "[ADB] OTA(업데이트) 알림 및 권한을 비활성화 합니다.";
 const FINALIZE_LOG: &str = "[GBST] 작업을 마무리 합니다.";
 const GOOGLE_RESTORE_DONE_LOG: &str = "[GBST] Google Services 복구 및 업데이트가 완료 되었습니다.";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -415,57 +420,414 @@ impl DirectAdb {
         Ok(())
     }
 
-    pub fn assess_google_services_from_downloaded_apks(&mut self, _apks: &[LocalApk]) -> GoogleServiceAction {
-        GoogleServiceAction::Normal
+    pub fn assess_google_services_from_downloaded_apks(&mut self, apks: &[LocalApk]) -> GoogleServiceAction {
+        let local_versions = apk_version_code_candidates_from_local_apks(apks);
+        self.assess_google_services_with_versions(&local_versions)
     }
 
-    pub fn assess_google_services_from_apk_dir(&mut self, _android_major: AndroidMajor) -> GoogleServiceAction {
-        GoogleServiceAction::Normal
+    pub fn assess_google_services_from_apk_dir(&mut self, android_major: AndroidMajor) -> GoogleServiceAction {
+        let apk_dir = paths::apk_download_dir(android_major.value());
+        let local_versions = apk_version_code_candidates_from_dir(&apk_dir);
+        self.assess_google_services_with_versions(&local_versions)
     }
 
-    fn read_google_package_state(&mut self, _package: &str) -> GooglePackageState {
-        GooglePackageState {
-            installed_for_user: true,
-            disabled: false,
-            version_code: None,
+    fn assess_google_services_with_versions(
+        &mut self,
+        local_versions: &std::collections::BTreeMap<String, Vec<u64>>,
+    ) -> GoogleServiceAction {
+        let mut update_required = false;
+
+        for package in GOOGLE_REQUIRED_PACKAGES {
+            let state = self.read_google_package_state(package);
+
+            if !state.installed_for_user || state.disabled {
+                return GoogleServiceAction::RepairRequired;
+            }
+
+            if let (Some(installed), Some(downloaded_candidates)) =
+                (state.version_code, local_versions.get(package))
+            {
+                if !downloaded_candidates.is_empty()
+                    && downloaded_candidates
+                        .iter()
+                        .all(|downloaded| *downloaded > installed)
+                {
+                    update_required = true;
+                }
+            }
+        }
+
+        if update_required {
+            GoogleServiceAction::UpdateRequired
+        } else {
+            GoogleServiceAction::Normal
         }
     }
 
-    fn is_package_path_available(&mut self, _package: &str) -> bool {
+    fn read_google_package_state(&mut self, package: &str) -> GooglePackageState {
+        let dumpsys = self
+            .shell(&format!("dumpsys package {package}"))
+            .unwrap_or_default();
+
+        let package_missing = dumpsys.trim().is_empty()
+            || dumpsys.contains("Unable to find package")
+            || dumpsys.contains("not found");
+
+        if package_missing {
+            return GooglePackageState {
+                installed_for_user: false,
+                disabled: false,
+                version_code: None,
+            };
+        }
+
+        let user_zero_line = dumpsys
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with("User 0:"));
+
+        let installed_for_user = self.package_list_contains(package, false)
+            || user_zero_line
+                .map(|line| !line.contains("installed=false"))
+                .unwrap_or_else(|| self.pm_path_exists(package));
+
+        let disabled_by_user_state = user_zero_line
+            .and_then(parse_enabled_state_from_user_line)
+            .map(|state| matches!(state, 2 | 3 | 4))
+            .unwrap_or(false);
+
+        let disabled = disabled_by_user_state || self.package_list_contains(package, true);
+        let version_code = self
+            .read_active_package_version_code(package)
+            .or_else(|| parse_installed_version_code(&dumpsys));
+
+        GooglePackageState {
+            installed_for_user,
+            disabled,
+            version_code,
+        }
+    }
+
+    fn read_active_package_version_code(&mut self, package: &str) -> Option<u64> {
+        let commands = [
+            format!("pm list packages --show-versioncode --user 0 {package}"),
+            format!("pm list packages --show-versioncode {package}"),
+        ];
+
+        for command in commands {
+            let output = self.shell(&command).unwrap_or_default();
+            if let Some(version_code) = parse_pm_list_version_code(&output, package) {
+                return Some(version_code);
+            }
+        }
+
+        None
+    }
+
+    fn pm_path_exists(&mut self, package: &str) -> bool {
+        self.shell(&format!("pm path {package}"))
+            .map(|output| output.lines().any(|line| line.trim().starts_with("package:")))
+            .unwrap_or(false)
+    }
+
+    fn package_list_contains(&mut self, package: &str, disabled_only: bool) -> bool {
+        let command = if disabled_only {
+            format!("pm list packages -d --user 0 {package}")
+        } else {
+            format!("pm list packages --user 0 {package}")
+        };
+
+        let output = self
+            .shell(&command)
+            .or_else(|_| {
+                let fallback = if disabled_only {
+                    format!("pm list packages -d {package}")
+                } else {
+                    format!("pm list packages {package}")
+                };
+                self.shell(&fallback)
+            })
+            .unwrap_or_default();
+
+        output
+            .lines()
+            .any(|line| line.trim() == format!("package:{package}"))
+    }
+
+    fn shell_inner(&mut self, command: &str) -> Result<String> {
+        let device = self.connect_device()?;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let result = device.shell_command(
+            &command,
+            Some(&mut stdout as &mut dyn Write),
+            Some(&mut stderr as &mut dyn Write),
+        );
+
+        match result {
+            Ok(_) => Ok(String::from_utf8_lossy(&stdout).trim().to_string()),
+            Err(err) => {
+                self.drop_device();
+                let stderr_text = String::from_utf8_lossy(&stderr).trim().to_string();
+                if stderr_text.is_empty() {
+                    Err(GbstError::Adb(format!("ADB shell 실패 `{command}`: {err}")))
+                } else {
+                    Err(GbstError::Adb(format!(
+                        "ADB shell 실패 `{command}`: {err} / stderr={stderr_text}"
+                    )))
+                }
+            }
+        }
+    }
+
+    pub fn install_apk_with_pm(&mut self, apk_path: &Path) -> Result<String> {
+        let file_name = apk_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                GbstError::Adb(format!(
+                    "APK 파일 이름을 읽을 수 없습니다: {}",
+                    apk_path.display()
+                ))
+            })?;
+
+        let remote_dir = "/data/local/tmp/gbst";
+        let remote_path = format!("{remote_dir}/{file_name}");
+
+        self.shell(&format!("mkdir -p {remote_dir}"))?;
+
+        let mut file = File::open(apk_path)?;
+        self.connect_device()?
+            .push(&mut file as &mut dyn Read, &remote_path)
+            .map_err(|err| {
+                GbstError::Adb(format!(
+                    "APK push 실패: {} -> {remote_path}: {err}",
+                    apk_path.display()
+                ))
+            })?;
+
+        let output = self.shell(&format!("pm install -r -d -g --user 0 {remote_path}"));
+        let _ = self.shell(&format!("rm -f {remote_path}"));
+        output
+    }
+
+    pub fn install_apk_candidates_with_pm(
+        &mut self,
+        package: &str,
+        apk_paths: &[PathBuf],
+    ) -> Result<String> {
+        if apk_paths.is_empty() {
+            return Err(GbstError::Adb(format!(
+                "설치할 APK 후보가 없습니다: {package}"
+            )));
+        }
+
+        let mut attempts = Vec::new();
+        let mut ambiguous_result = false;
+
+        for apk_path in apk_paths {
+            match self.install_apk_with_pm(apk_path) {
+                Ok(output) => {
+                    if pm_install_explicitly_failed(&output) {
+                        attempts.push(format!(
+                            "{}: {}",
+                            apk_path.display(),
+                            compact_pm_output(&output)
+                        ));
+                        continue;
+                    }
+
+                    if pm_install_explicitly_succeeded(&output)
+                        || self.wait_for_user_package(package, 3, Duration::from_millis(500))
+                    {
+                        return Ok(output);
+                    }
+
+                    ambiguous_result = true;
+                    attempts.push(format!(
+                        "{}: 설치 결과를 확인하지 못했습니다",
+                        apk_path.display()
+                    ));
+                }
+                Err(err) => {
+                    attempts.push(format!("{}: {err}", apk_path.display()));
+                }
+            }
+        }
+
+        if ambiguous_result
+            && self.wait_for_user_package(package, 3, Duration::from_millis(500))
+        {
+            return Ok(String::new());
+        }
+
+        Err(GbstError::Adb(format!(
+            "서명별 APK 후보를 모두 설치하지 못했습니다: {package} / {}",
+            attempts.join(" | ")
+        )))
+    }
+
+    fn wait_for_user_package(
+        &mut self,
+        package: &str,
+        attempts: usize,
+        interval: Duration,
+    ) -> bool {
+        for attempt in 0..attempts.max(1) {
+            if self.package_list_contains(package, false) {
+                return true;
+            }
+            if attempt + 1 < attempts {
+                thread::sleep(interval);
+            }
+        }
         false
     }
 
-    fn package_list_contains(&mut self, _package: &str, _disabled_only: bool) -> bool {
-        false
-    }
+    fn requested_permissions(&mut self, package: &str) -> Result<Vec<String>> {
+        let output = self.shell(&format!("dumpsys package {package}"))?;
+        let mut permissions = Vec::new();
+        let mut in_requested = false;
 
-    pub fn install_apk_with_pm(&mut self, _apk_path: &std::path::Path) -> Result<String> {
-        Ok(CORE_REDACTED_NOTICE.to_string())
+        for raw_line in output.lines() {
+            let line = raw_line.trim();
+
+            if !in_requested {
+                if line.starts_with("requested permissions:") {
+                    in_requested = true;
+                }
+                continue;
+            }
+
+            if line.starts_with("install permissions:")
+                || line.starts_with("runtime permissions:")
+                || line.starts_with("User ")
+            {
+                break;
+            }
+
+            if line.is_empty() {
+                continue;
+            }
+
+            let mut permission = line.split_whitespace().next().unwrap_or(line).to_string();
+            if let Some((left, _)) = permission.split_once(':') {
+                permission = left.to_string();
+            }
+
+            if permission.starts_with("android.permission.") && !permissions.contains(&permission) {
+                permissions.push(permission);
+            }
+        }
+
+        Ok(permissions)
     }
 
     fn grant_requested_permissions<F>(
         &mut self,
-        _package: &str,
-        _permissions: &[String],
+        package: &str,
+        permissions: &[String],
         mut on_log: F,
     ) -> Result<()>
     where
         F: FnMut(String),
     {
-        on_log(CORE_REDACTED_NOTICE.to_string());
+        let requested = self.requested_permissions(package).unwrap_or_default();
+        let targets: Vec<&String> = if requested.is_empty() {
+            permissions.iter().collect()
+        } else {
+            permissions
+                .iter()
+                .filter(|permission| requested.iter().any(|value| value == *permission))
+                .collect()
+        };
+
+        if targets.is_empty() {
+            on_log(format!("{package}: 부여할 런타임 권한 없음"));
+            return Ok(());
+        }
+
+        for permission in targets {
+            match self.shell(&format!("pm grant {package} {permission}")) {
+                Ok(_) => on_log(format!("[OK] pm grant {permission}")),
+                Err(err) => on_log(format!("[WARN] pm grant {permission}: {err}")),
+            }
+        }
+
         Ok(())
     }
 
-    fn allow_existing_appops<F>(
-        &mut self,
-        _package: &str,
-        _ops: &[String],
-        mut on_log: F,
-    ) -> Result<()>
+    fn existing_appops(&mut self, package: &str) -> Vec<String> {
+        let mut output = self
+            .shell(&format!("appops get --user 0 {package}"))
+            .unwrap_or_default();
+
+        if output.trim().is_empty() {
+            output = self.shell(&format!("appops get {package}")).unwrap_or_default();
+        }
+
+        let mut ops: Vec<String> = Vec::new();
+        for raw_line in output.lines() {
+            let mut line = raw_line.trim().to_string();
+            if line.is_empty() {
+                continue;
+            }
+
+            if let Some(rest) = line.strip_prefix("Uid mode:") {
+                line = rest.trim().to_string();
+            }
+
+            let Some((op, _)) = line.split_once(':') else {
+                continue;
+            };
+
+            let op = op.trim();
+            if op.is_empty() {
+                continue;
+            }
+
+            if op.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                && !ops.iter().any(|value| value.as_str() == op)
+            {
+                ops.push(op.to_string());
+            }
+        }
+
+        ops
+    }
+
+    fn allow_existing_appops<F>(&mut self, package: &str, ops: &[String], mut on_log: F) -> Result<()>
     where
         F: FnMut(String),
     {
-        on_log(CORE_REDACTED_NOTICE.to_string());
+        let existing = self.existing_appops(package);
+        let targets: Vec<&String> = if existing.is_empty() {
+            ops.iter().collect()
+        } else {
+            ops.iter()
+                .filter(|op| existing.iter().any(|value| value == *op))
+                .collect()
+        };
+
+        if targets.is_empty() {
+            on_log(format!("{package}: 적용할 AppOps 없음"));
+        }
+
+        for op in targets {
+            for command in [
+                format!("cmd appops set --user 0 {package} {op} allow"),
+                format!("cmd appops set --user 0 --uid {package} {op} allow"),
+                format!("appops set --user 0 {package} {op} allow"),
+                format!("appops set --user 0 --uid {package} {op} allow"),
+            ] {
+                let _ = self.shell(&command);
+            }
+            on_log(format!("[OK] AppOps allow {op}"));
+        }
+
+        let _ = self.shell("appops write-settings");
+        let _ = self.shell("cmd appops write-settings");
         Ok(())
     }
 
@@ -493,23 +855,214 @@ impl DirectAdb {
     where
         F: FnMut(String),
     {
-        on_log(CORE_REDACTED_NOTICE.to_string());
+        let stage_totals = google_stage_totals(&plan.steps);
+        let mut stage_positions = [0usize; 5];
+        let mut google_stage: Option<u8> = None;
+        let mut google_stage_guide_emitted = [false; 5];
+        let mut preparation_emitted = false;
+        let mut device_connect_prep_emitted = false;
+        let mut finalize_emitted = false;
 
         for step in &plan.steps {
+            if let Some(stage) = infer_google_stage(step, google_stage) {
+                google_stage = Some(stage);
+                let stage_index = stage as usize;
+                if stage_index < google_stage_guide_emitted.len()
+                    && !google_stage_guide_emitted[stage_index]
+                {
+                    emit_google_restore_wait_guide(&mut on_log);
+                    google_stage_guide_emitted[stage_index] = true;
+                }
+            }
+
+            let display_label = display_label_for_step(step, google_stage);
+            let spinner_key = spinner_key_for_step(step, google_stage);
+
+            if let Some(stage) = google_stage {
+                if display_label
+                    .as_deref()
+                    .is_some_and(|label| label.starts_with("구글 서비스 작업 중"))
+                {
+                    stage_positions[stage as usize] = stage_positions[stage as usize].saturating_add(1);
+                    on_log(google_stage_progress_log(
+                        stage,
+                        stage_positions[stage as usize],
+                        stage_totals[stage as usize],
+                    ));
+                }
+            } else if let Some(label) = display_label.as_deref() {
+                if label == PREPARATION_LOG {
+                    if !preparation_emitted {
+                        preparation_emitted = true;
+                        on_log(label.to_string());
+                    }
+                } else if label == DEVICE_CONNECT_PREP_LOG {
+                    if !device_connect_prep_emitted {
+                        device_connect_prep_emitted = true;
+                        on_log(label.to_string());
+                    }
+                } else if label == FINALIZE_LOG {
+                    if !finalize_emitted {
+                        finalize_emitted = true;
+                        on_log(label.to_string());
+                    }
+                } else if let Some(key) = spinner_key.as_deref() {
+                    on_log(spinner_log(key, label));
+                } else {
+                    on_log(label.to_string());
+                }
+            }
+
+            if let PlanStep::RebootAndWait { .. } = step {
+                if let Some(stage) = google_stage {
+                    on_log(google_stage_complete_log(stage));
+                }
+            }
+
             match step {
-                PlanStep::Delay { seconds, policy, .. } => {
-                    match self.delay_seconds(*seconds, |line| on_log(line)) {
-                        Ok(()) => {}
+                PlanStep::Shell {
+                    label,
+                    command,
+                    policy,
+                } => {
+                    match self.shell(command) {
+                        Ok(out) => {
+                            if should_show_command_output(label, out.trim()) {
+                                on_log(format!("    {}", out.trim()));
+                            }
+                        }
                         Err(err) if *policy == FailurePolicy::Continue => {
-                            on_log(format!("    [Warning] {err}"));
+                            if should_show_recoverable_error(label, &err.to_string()) {
+                                on_log(format!("    [경고] 계속 진행: {err}"));
+                            }
                         }
                         Err(err) => return Err(err),
                     }
                 }
-                _ => on_log(CORE_REDACTED_NOTICE.to_string()),
+                PlanStep::InstallApk { path, policy, .. } => {
+                    match self.install_apk_with_pm(path) {
+                        Ok(out) => {
+                            if should_show_command_output("APK 설치", out.trim()) {
+                                on_log(format!("    {}", out.trim()));
+                            }
+                        }
+                        Err(err) if *policy == FailurePolicy::Continue => {
+                            if should_show_recoverable_error("APK 설치", &err.to_string()) {
+                                on_log(format!("    [경고] APK 설치 실패, 계속 진행: {err}"));
+                            }
+                        }
+                        Err(err) => return Err(err),
+                    }
+                }
+                PlanStep::InstallApkCandidates {
+                    package,
+                    paths,
+                    policy,
+                } => {
+                    match self.install_apk_candidates_with_pm(package, paths) {
+                        Ok(out) => {
+                            if should_show_command_output("APK 설치", out.trim()) {
+                                on_log(format!("    {}", out.trim()));
+                            }
+                        }
+                        Err(err) if *policy == FailurePolicy::Continue => {
+                            if should_show_recoverable_error("APK 설치", &err.to_string()) {
+                                on_log(format!("    [경고] APK 후보 설치 실패, 계속 진행: {err}"));
+                            }
+                        }
+                        Err(err) => return Err(err),
+                    }
+                }
+                PlanStep::Delay { seconds, policy, .. } => {
+                    match self.delay_seconds(*seconds, |line| on_log(line)) {
+                        Ok(()) => {}
+                        Err(err) if *policy == FailurePolicy::Continue => {
+                            if should_show_recoverable_error("대기", &err.to_string()) {
+                                on_log(format!("    [경고] 대기 실패, 계속 진행: {err}"));
+                            }
+                        }
+                        Err(err) => return Err(err),
+                    }
+                }
+                PlanStep::RebootAndWait { policy, .. } => {
+                    match self.reboot_and_wait_once(|line| on_log(line)) {
+                        Ok(()) => {
+                            if plan.android_major == AndroidMajor::Android13 {
+                                on_log("[ADB] Android 13 추가 재부팅을 진행합니다.".to_string());
+                                match self.reboot_and_wait_once(|line| on_log(line)) {
+                                    Ok(()) => {}
+                                    Err(err) if *policy == FailurePolicy::Continue => {
+                                        if should_show_recoverable_error("Android 13 추가 재부팅", &err.to_string()) {
+                                            on_log(format!("    [경고] Android 13 추가 재부팅 실패, 계속 진행: {err}"));
+                                        }
+                                    }
+                                    Err(err) => return Err(err),
+                                }
+                            }
+                        }
+                        Err(err) if *policy == FailurePolicy::Continue => {
+                            if should_show_recoverable_error("재부팅", &err.to_string()) {
+                                on_log(format!("    [경고] 재부팅 실패, 계속 진행: {err}"));
+                            }
+                        }
+                        Err(err) => return Err(err),
+                    }
+                }
+                PlanStep::GrantRequestedPermissions {
+                    package,
+                    permissions,
+                    policy,
+                    ..
+                } => {
+                    match self.grant_requested_permissions(package, permissions, |_| {}) {
+                        Ok(()) => {}
+                        Err(err) if *policy == FailurePolicy::Continue => {
+                            if should_show_recoverable_error(package, &err.to_string()) {
+                                on_log(format!("    [경고] 권한 적용 실패, 계속 진행: {err}"));
+                            }
+                        }
+                        Err(err) => return Err(err),
+                    }
+                }
+                PlanStep::AppOpsAllowExisting {
+                    package,
+                    ops,
+                    policy,
+                    ..
+                } => {
+                    match self.allow_existing_appops(package, ops, |_| {}) {
+                        Ok(()) => {}
+                        Err(err) if *policy == FailurePolicy::Continue => {
+                            if should_show_recoverable_error(package, &err.to_string()) {
+                                on_log(format!("    [경고] AppOps 적용 실패, 계속 진행: {err}"));
+                            }
+                        }
+                        Err(err) => return Err(err),
+                    }
+                }
+                PlanStep::HealthCheck {
+                    packages,
+                    policy,
+                    ..
+                } => {
+                    for package in packages {
+                        match self.shell(&format!("pm path {package}")) {
+                            Ok(_) => {}
+                            Err(err) if *policy == FailurePolicy::Continue => {
+                                if should_show_recoverable_error(package, &err.to_string()) {
+                                    on_log(format!("    [WARN] {package}: {err}"));
+                                }
+                            }
+                            Err(err) => return Err(err),
+                        }
+                    }
+                }
+            }
+
+            if should_clear_google_stage(step) {
+                google_stage = None;
             }
         }
-
         Ok(())
     }
 
@@ -813,6 +1366,30 @@ pub fn kill_adb_server_direct() -> Result<()> {
     }
 }
 
+fn pm_install_explicitly_succeeded(output: &str) -> bool {
+    output
+        .lines()
+        .map(str::trim)
+        .any(|line| line.eq_ignore_ascii_case("Success") || line.starts_with("Success"))
+}
+
+fn pm_install_explicitly_failed(output: &str) -> bool {
+    let lowered = output.to_ascii_lowercase();
+    lowered.contains("failure")
+        || lowered.contains("install_failed_")
+        || lowered.contains("error:")
+        || lowered.contains("exception")
+}
+
+fn compact_pm_output(output: &str) -> String {
+    let compact = output.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        "빈 응답".to_string()
+    } else {
+        compact
+    }
+}
+
 fn parse_enabled_state_from_user_line(line: &str) -> Option<u32> {
     line.split_whitespace()
         .find_map(|part| part.strip_prefix("enabled="))
@@ -823,6 +1400,24 @@ fn parse_enabled_state_from_user_line(line: &str) -> Option<u32> {
                 .collect::<String>();
             digits.parse::<u32>().ok()
         })
+}
+
+fn parse_pm_list_version_code(output: &str, package: &str) -> Option<u64> {
+    let expected_package = format!("package:{package}");
+
+    output.lines().find_map(|raw_line| {
+        let line = raw_line.trim();
+        if !line.starts_with(&expected_package) {
+            return None;
+        }
+
+        line.split_whitespace().find_map(|token| {
+            token
+                .strip_prefix("versionCode:")
+                .or_else(|| token.strip_prefix("versionCode="))
+                .and_then(parse_leading_u64)
+        })
+    })
 }
 
 fn parse_installed_version_code(dumpsys: &str) -> Option<u64> {
@@ -857,31 +1452,231 @@ fn emit_google_restore_wait_guide<F>(on_log: &mut F)
 where
     F: FnMut(String),
 {
-    on_log(CORE_REDACTED_NOTICE.to_string());
+    on_log("__BLANK__".to_string());
+    on_log("[안내] 동일한 질문을 주시는 분들이 많아 안내 드립니다.".to_string());
+    on_log("[안내] 프로그램이 작업 중이므로 작업이 멈추거나, 중단되거나,".to_string());
+    on_log("[안내] 연결이 끊긴 것이 아니니 안심하시고 작업이 완료 될 때까지".to_string());
+    on_log("[안내] PC(노트북), 케이블, 기기를 가만히 둔 상태로 1분~5분 대기해 주세요.".to_string());
 }
 
-fn display_label_for_step(step: &PlanStep, _stage: Option<u8>) -> Option<String> {
+fn display_label_for_step(step: &PlanStep, google_stage: Option<u8>) -> Option<String> {
     match step {
+        PlanStep::Shell { label, .. } => display_label_from_text(label, google_stage),
+        PlanStep::InstallApk { .. } | PlanStep::InstallApkCandidates { .. } => google_stage
+            .map(|stage| format!("구글 서비스 작업 중... ({stage}/4)"))
+            .or_else(|| Some("[APK] APK 설치 중".to_string())),
+        PlanStep::Delay { label, .. } => {
+            if let Some(stage) = google_stage {
+                if is_google_stage_delay(label) {
+                    return Some(format!("구글 서비스 작업 중... ({stage}/4)"));
+                }
+            }
+
+            if is_ota_label(label) {
+                Some(OTA_DISABLE_LOG.to_string())
+            } else {
+                None
+            }
+        }
+        PlanStep::RebootAndWait { .. } => Some("[ADB] 기기 재부팅 중...".to_string()),
+        PlanStep::GrantRequestedPermissions { .. } | PlanStep::AppOpsAllowExisting { .. } => {
+            Some("구글 서비스 작업 중... (4/4)".to_string())
+        }
+        PlanStep::HealthCheck { .. } => Some(GOOGLE_RESTORE_DONE_LOG.to_string()),
+    }
+}
+
+fn display_label_from_text(label: &str, google_stage: Option<u8>) -> Option<String> {
+    if is_wakeup_detail_label(label) {
+        return None;
+    }
+
+    if label == "화면 깨우기" {
+        return Some(DEVICE_CONNECT_PREP_LOG.to_string());
+    }
+
+    if is_ota_label(label) {
+        return Some(OTA_DISABLE_LOG.to_string());
+    }
+
+    if let Some(stage) = google_stage {
+        if is_google_stage_detail_label(label) || is_google_stage_delay(label) {
+            return Some(format!("구글 서비스 작업 중... ({stage}/4)"));
+        }
+    }
+
+    if is_preparation_label(label) {
+        return Some(PREPARATION_LOG.to_string());
+    }
+
+    if label.contains("Play Store 초기 설정")
+        || label.contains("최종 초기화")
+        || label.contains("최종 설정")
+        || label.contains("작업 후")
+        || label.contains("Android 설정 앱")
+    {
+        return Some(FINALIZE_LOG.to_string());
+    }
+
+    Some(label.to_string())
+}
+
+fn spinner_key_for_step(step: &PlanStep, google_stage: Option<u8>) -> Option<String> {
+    match step {
+        PlanStep::Shell { label, .. } => {
+            if is_ota_label(label) {
+                Some("ota".to_string())
+            } else if label == "화면 깨우기" {
+                Some("wakeup".to_string())
+            } else if is_preparation_label(label) {
+                Some("preparation".to_string())
+            } else if let Some(stage) = google_stage {
+                if is_google_stage_detail_label(label) || is_google_stage_delay(label) {
+                    Some(format!("google_restore_{stage}"))
+                } else {
+                    None
+                }
+            } else if label.contains("Play Store 초기 설정")
+                || label.contains("최종 초기화")
+                || label.contains("최종 설정")
+                || label.contains("작업 후")
+                || label.contains("Android 설정 앱")
+            {
+                Some("finalize".to_string())
+            } else {
+                None
+            }
+        }
+        PlanStep::InstallApk { .. } | PlanStep::InstallApkCandidates { .. } => google_stage
+            .map(|stage| format!("google_restore_{stage}"))
+            .or_else(|| Some("install_apk".to_string())),
+        PlanStep::Delay { label, .. } => {
+            if is_ota_label(label) {
+                Some("ota".to_string())
+            } else if let Some(stage) = google_stage {
+                if is_google_stage_delay(label) {
+                    Some(format!("google_restore_{stage}"))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        PlanStep::RebootAndWait { .. } => Some("adb_reboot".to_string()),
+        PlanStep::GrantRequestedPermissions { .. } | PlanStep::AppOpsAllowExisting { .. } => {
+            Some("google_restore_4".to_string())
+        }
+        PlanStep::HealthCheck { .. } => Some("health_check".to_string()),
+    }
+}
+
+fn infer_google_stage(step: &PlanStep, current: Option<u8>) -> Option<u8> {
+    let label = match step {
         PlanStep::Shell { label, .. }
         | PlanStep::Delay { label, .. }
         | PlanStep::RebootAndWait { label, .. }
         | PlanStep::GrantRequestedPermissions { label, .. }
         | PlanStep::AppOpsAllowExisting { label, .. }
-        | PlanStep::HealthCheck { label, .. } => Some(label.clone()),
-        PlanStep::InstallApk { .. } => Some(CORE_REDACTED_NOTICE.to_string()),
+        | PlanStep::HealthCheck { label, .. } => label.as_str(),
+        PlanStep::InstallApk { .. } | PlanStep::InstallApkCandidates { .. } => return current,
+    };
+
+    if label.contains("루틴 1")
+        || matches!(
+            label,
+            "PartnerSetup 제거"
+                | "Google ext.shared 제거"
+                | "ConfigUpdater 제거"
+                | "OneTimeInitializer 제거"
+                | "PrintService Recommendation 제거"
+        )
+    {
+        return Some(1);
     }
-}
 
-fn spinner_key_for_step(_step: &PlanStep, _stage: Option<u8>) -> Option<String> {
-    Some("redacted_workflow".to_string())
-}
+    if label.contains("루틴 2")
+        || matches!(
+            label,
+            "Play Store 제거"
+                | "Google Play Services 제거"
+                | "Google Play Services 데이터 초기화"
+                | "Play Store 데이터 초기화"
+                | "Play Store 사용 가능 설정"
+        )
+    {
+        return Some(2);
+    }
 
-fn infer_google_stage(_step: &PlanStep, current: Option<u8>) -> Option<u8> {
+    if label.contains("루틴 3")
+        || label.contains("Google Services Framework")
+        || label.starts_with("GSF 패키지")
+    {
+        return Some(3);
+    }
+
+    if label.contains("루틴 4")
+        || label.contains("요청 권한")
+        || label.contains("AppOps")
+        || label.contains("Global pipe key")
+        || (current.is_none() && (label.starts_with("패키지 복구:") || label.starts_with("패키지 활성화:")))
+    {
+        return Some(4);
+    }
+
     current
 }
 
-fn should_clear_google_stage(_step: &PlanStep) -> bool {
-    false
+fn should_clear_google_stage(step: &PlanStep) -> bool {
+    match step {
+        PlanStep::RebootAndWait { label, .. } => label.contains("루틴") && label.contains("완료 후 재부팅"),
+        _ => false,
+    }
+}
+
+fn is_ota_label(label: &str) -> bool {
+    label.contains("OTA 네트워크")
+        || label.contains("OTA 새 버전")
+        || label.contains("Setup Wizard OTA")
+        || label.contains("OTA 프로세스")
+        || label.contains("OTA 자동 업데이트")
+        || label.contains("OTA 알림 비활성화")
+}
+
+fn is_wakeup_detail_label(label: &str) -> bool {
+    label.contains("잠금 해제 보조 키 입력")
+        || label.starts_with("키 이벤트 ")
+        || label == "기기 깨우기 후 2초 대기"
+}
+
+fn is_preparation_label(label: &str) -> bool {
+    label.contains("중국 입력기")
+        || label.contains("Lenovo OTA 앱 제거")
+        || label.contains("Lenovo tbengine")
+        || label.contains("ZUI homesettings")
+        || label.contains("Lenovo ue.device")
+        || label.contains("무음 모드")
+        || label.contains("화면 꺼짐")
+        || label.contains("가로 화면")
+        || label.contains("화면 밝기 낮춤")
+        || label.contains("사전 준비")
+}
+
+fn is_google_stage_detail_label(label: &str) -> bool {
+    label.contains("제거")
+        || label.contains("APK 설치")
+        || label.contains("패키지 복구")
+        || label.contains("패키지 활성화")
+        || label.contains("데이터 초기화")
+        || label.contains("Play Store 사용 가능 설정")
+        || label.contains("요청 권한")
+        || label.contains("AppOps")
+        || label.contains("Global pipe key")
+        || label.contains("루틴")
+}
+
+fn is_google_stage_delay(label: &str) -> bool {
+    label.contains("Google 서비스 복구 루틴")
 }
 
 fn should_show_command_output(_label: &str, _output: &str) -> bool {
@@ -889,24 +1684,79 @@ fn should_show_command_output(_label: &str, _output: &str) -> bool {
 }
 
 fn should_show_recoverable_error(_label: &str, error: &str) -> bool {
-    !error.trim().is_empty()
+    let text = error.trim();
+    !(text.is_empty()
+        || text.contains("Failure")
+        || text.contains("INSTALL_FAILED_")
+        || text.contains("ADB shell 실패")
+        || text.contains("USB Error")
+        || text.contains("Input/Output Error"))
 }
 
-fn google_stage_tupdatels(_steps: &[PlanStep]) -> [usize; 5] {
-    [1, 1, 1, 1, 1]
+fn google_stage_totals(steps: &[PlanStep]) -> [usize; 5] {
+    let mut totals = [0usize; 5];
+    let mut current_stage: Option<u8> = None;
+
+    for step in steps {
+        if let Some(stage) = infer_google_stage(step, current_stage) {
+            current_stage = Some(stage);
+        }
+
+        if let Some(stage) = current_stage {
+            if display_label_for_step(step, current_stage)
+                .as_deref()
+                .is_some_and(|label| label.starts_with("구글 서비스 작업 중"))
+            {
+                totals[stage as usize] = totals[stage as usize].saturating_add(1);
+            }
+        }
+
+        if should_clear_google_stage(step) {
+            current_stage = None;
+        }
+    }
+
+    for total in totals.iter_mut().skip(1) {
+        if *total == 0 {
+            *total = 1;
+        }
+    }
+
+    totals
 }
 
-fn google_stage_progress_log(stage: u8, _current: usize, _tupdatel: usize) -> String {
+fn compact_progress_bar(current: usize, total: usize) -> String {
+    let total = total.max(1);
+    let current = current.min(total);
+    let percent = if current >= total {
+        100
+    } else {
+        ((current as f32 / total as f32) * 100.0).round() as usize
+    };
+    let total_blocks = 20usize;
+    let filled = ((percent.min(100) * total_blocks) + 50) / 100;
+    let empty = total_blocks.saturating_sub(filled);
+
+    format!("[{}{}] {}%", "█".repeat(filled), "·".repeat(empty), percent.min(100))
+}
+
+fn google_stage_progress_log(stage: u8, current: usize, total: usize) -> String {
     spinner_log(
-        &format!("redacted_workflow_{stage}"),
-        CORE_REDACTED_NOTICE,
+        &format!("google_restore_{stage}"),
+        &format!(
+            "[APK] {} 구글 서비스 작업 중... ({stage}/4)",
+            compact_progress_bar(current, total),
+        ),
     )
 }
 
 fn google_stage_complete_log(stage: u8) -> String {
     spinner_log(
-        &format!("redacted_workflow_{stage}"),
-        CORE_REDACTED_NOTICE,
+        &format!("google_restore_{stage}"),
+        &format!(
+            "[APK] {} 구글 서비스 작업 {stage}단계 완료",
+            compact_progress_bar(1, 1),
+        ),
     )
 }
 

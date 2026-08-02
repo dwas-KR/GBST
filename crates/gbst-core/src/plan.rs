@@ -4,8 +4,6 @@ use crate::model::{AndroidMajor, FailurePolicy, InstallPlan, LocalApk, PlanStep}
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-const REDACTED_NOTICE: &str = "This code is part of the program's core implementation and has been commented out.";
-
 const PKG_VENDING: &str = "com.android.vending";
 const PKG_GSF: &str = "com.google.android.gsf";
 const PKG_GMS: &str = "com.google.android.gms";
@@ -236,9 +234,64 @@ fn push_google_restore_stage_1(
     steps: &mut Vec<PlanStep>,
     by_package: &BTreeMap<String, Vec<PathBuf>>,
 ) -> Result<()> {
-    // This code is part of the program's core implementation and has been commented out.
-    let _ = by_package;
-    push_delay(steps, REDACTED_NOTICE, 1);
+    push_shell(steps, "PartnerSetup 제거", format!("pm uninstall --user 0 {PKG_PARTNER_SETUP}"));
+    push_shell(steps, "Google ext.shared 제거", format!("pm uninstall --user 0 {PKG_EXT_SHARED}"));
+    push_shell(steps, "ConfigUpdater 제거", format!("pm uninstall --user 0 {PKG_CONFIG_UPDATER}"));
+    push_shell(steps, "OneTimeInitializer 제거", format!("pm uninstall --user 0 {PKG_ONE_TIME_INITIALIZER}"));
+    push_shell(steps, "PrintService Recommendation 제거", format!("pm uninstall --user 0 {PKG_PRINT_RECOMMENDATION}"));
+    push_delay(steps, "Google 서비스 복구 루틴 1 삭제 후 2초 대기", 2);
+
+    push_install_all(steps, by_package, PKG_PARTNER_SETUP, FailurePolicy::Stop)?;
+    push_install_all(steps, by_package, PKG_CONFIG_UPDATER, FailurePolicy::Stop)?;
+    push_install_all(steps, by_package, PKG_ONE_TIME_INITIALIZER, FailurePolicy::Stop)?;
+    push_install_all(steps, by_package, PKG_PRINT_RECOMMENDATION, FailurePolicy::Stop)?;
+    push_delay(steps, "Google 서비스 복구 루틴 1 설치 후 2초 대기", 2);
+
+    for package in [
+        PKG_PARTNER_SETUP,
+        PKG_VENDING,
+        PKG_GSF,
+        PKG_GMS,
+        PKG_EXT_SHARED,
+        PKG_CONFIG_UPDATER,
+        PKG_ONE_TIME_INITIALIZER,
+        PKG_PRINT_RECOMMENDATION,
+    ] {
+        push_shell(steps, format!("패키지 복구: {package}"), format!("cmd package install-existing --user 0 {package}"));
+    }
+    push_delay(steps, "Google 서비스 복구 루틴 1 복원 후 2초 대기", 2);
+
+    for package in [
+        PKG_PARTNER_SETUP,
+        PKG_VENDING,
+        PKG_GSF,
+        PKG_GMS,
+        PKG_EXT_SHARED,
+        PKG_CONFIG_UPDATER,
+        PKG_ONE_TIME_INITIALIZER,
+        PKG_PRINT_RECOMMENDATION,
+    ] {
+        push_shell(steps, format!("패키지 활성화: {package}"), format!("pm enable {package}"));
+    }
+    push_delay(steps, "Google 서비스 복구 루틴 1 활성화 후 2초 대기", 2);
+
+    for package in [
+        PKG_PARTNER_SETUP,
+        PKG_VENDING,
+        PKG_GSF,
+        PKG_GMS,
+        PKG_EXT_SHARED,
+        PKG_CONFIG_UPDATER,
+        PKG_ONE_TIME_INITIALIZER,
+        PKG_PRINT_RECOMMENDATION,
+    ] {
+        push_shell(steps, format!("패키지 데이터 초기화: {package}"), format!("pm clear {package}"));
+    }
+    push_ota_disable_steps(steps);
+    push_reboot_and_wait(steps, "Google 서비스 복구 루틴 1 완료 후 재부팅");
+    push_delay(steps, "재부팅 감지 성공 후 5초 대기", 5);
+    push_wakeup_key_sequence(steps);
+
     Ok(())
 }
 
@@ -246,9 +299,34 @@ fn push_google_restore_stage_2(
     steps: &mut Vec<PlanStep>,
     by_package: &BTreeMap<String, Vec<PathBuf>>,
 ) -> Result<()> {
-    // This code is part of the program's core implementation and has been commented out.
-    let _ = by_package;
-    push_delay(steps, REDACTED_NOTICE, 1);
+    push_shell(steps, "Play Store 제거", format!("pm uninstall --user 0 {PKG_VENDING}"));
+    push_shell(steps, "Google Play Services 제거", format!("pm uninstall --user 0 {PKG_GMS}"));
+    push_delay(steps, "Google 서비스 복구 루틴 2 삭제 후 2초 대기", 2);
+
+    push_install_all(steps, by_package, PKG_GMS, FailurePolicy::Stop)?;
+    push_install_all(steps, by_package, PKG_VENDING, FailurePolicy::Stop)?;
+    push_delay(steps, "Google 서비스 복구 루틴 2 설치 후 2초 대기", 2);
+
+    for package in [PKG_GMS, PKG_GSF, PKG_VENDING] {
+        push_shell(steps, format!("패키지 복구: {package}"), format!("cmd package install-existing --user 0 {package}"));
+    }
+    push_delay(steps, "Google 서비스 복구 루틴 2 복원 후 2초 대기", 2);
+
+    for package in [PKG_GMS, PKG_GSF, PKG_VENDING] {
+        push_shell(steps, format!("패키지 활성화: {package}"), format!("pm enable {package}"));
+    }
+    push_shell_stop(steps, "Play Store 사용 가능 설정", "settings put global phone_play_store_availability 1");
+    push_delay(steps, "Google 서비스 복구 루틴 2 활성화 후 2초 대기", 2);
+
+    push_shell(steps, "Google Play Services 데이터 초기화", format!("pm clear {PKG_GMS}"));
+    push_shell(steps, "Play Store 데이터 초기화", format!("pm clear {PKG_VENDING}"));
+    push_delay(steps, "Google 서비스 복구 루틴 2 데이터 초기화 후 2초 대기", 2);
+
+    push_ota_disable_steps(steps);
+    push_reboot_and_wait(steps, "Google 서비스 복구 루틴 2 완료 후 재부팅");
+    push_delay(steps, "재부팅 감지 성공 후 5초 대기", 5);
+    push_wakeup_key_sequence(steps);
+
     Ok(())
 }
 
@@ -256,9 +334,22 @@ fn push_google_restore_stage_3(
     steps: &mut Vec<PlanStep>,
     by_package: &BTreeMap<String, Vec<PathBuf>>,
 ) -> Result<()> {
-    // This code is part of the program's core implementation and has been commented out.
-    let _ = by_package;
-    push_delay(steps, REDACTED_NOTICE, 1);
+    push_shell(steps, "Google Services Framework 제거", format!("pm uninstall --user 0 {PKG_GSF}"));
+    push_delay(steps, "Google 서비스 복구 루틴 3 삭제 후 2초 대기", 2);
+
+    push_install_all(steps, by_package, PKG_GSF, FailurePolicy::Stop)?;
+    push_delay(steps, "Google 서비스 복구 루틴 3 설치 후 2초 대기", 2);
+
+    push_shell(steps, "GSF 패키지 복구", format!("cmd package install-existing --user 0 {PKG_GSF}"));
+    push_delay(steps, "Google 서비스 복구 루틴 3 복원 후 2초 대기", 2);
+
+    push_shell(steps, "GSF 패키지 활성화", format!("pm enable {PKG_GSF}"));
+    push_ota_disable_steps(steps);
+    push_delay(steps, "Google 서비스 복구 루틴 3 활성화 후 2초 대기", 2);
+    push_reboot_and_wait(steps, "Google 서비스 복구 루틴 3 완료 후 재부팅");
+    push_delay(steps, "재부팅 감지 성공 후 5초 대기", 5);
+    push_wakeup_key_sequence(steps);
+
     Ok(())
 }
 

@@ -28,19 +28,6 @@ The APK files provided through GBST are stored and distributed **without modific
 
 GBST does not rebuild, re-sign, or modify the original APK packages downloaded from APKMirror.
 
-Users who would like to independently verify the files may compare the GBST-provided APKs with the corresponding APKMirror downloads by checking:
-
-* Exact file size in bytes
-* Package name and version
-* APK certificate or signature
-* Cryptographic file hashes, such as SHA-256
-
-The download catalog used by GBST is available here:
-
-https://github.com/dwas-KR/GBST/blob/Download/GBST_apk.txt
-
-> APKMirror is the original source of the APK files. The developer's personal drive is used only as a distribution location for the unchanged files required by GBST.
-
 ## How to Use GBST
 
 1. Connect your Lenovo Android tablet to your PC using a USB data cable.
@@ -58,22 +45,6 @@ https://github.com/dwas-KR/GBST/blob/Download/GBST_apk.txt
 5. After the download is complete, click **Start** in the **Google Services Install/Repair/Update** section.
 6. Do not disconnect the tablet from the PC until the task is complete. Refer to the logs for detailed progress and results.
 
-## Dashboard
-
-The dashboard displays the following information about the connected tablet:
-
-* Model name
-* Android version
-* Manufacturer
-* ROM type
-* Google service status
-
-It also provides quick access to the following features:
-
-* Support the developer
-* Google service installation, repair, and update
-* Developer YouTube channel
-
 ## Sidebar Menu
 
 The sidebar provides quick access to the main areas of the program:
@@ -82,18 +53,6 @@ The sidebar provides quick access to the main areas of the program:
 * **Start Google Task:** Start the Google Basic Services installation, repair, and update workflow.
 * **Log Management:** Review task progress and result logs.
 * **Settings:** Change the language, check for program updates, submit feedback, and access developer links.
-
-## Settings
-
-The Settings page includes the following options:
-
-* Language selection
-* Developer YouTube link
-* Support link
-* Program update check
-* Feedback link
-
-The selected language is saved automatically and will remain active the next time GBST is launched.
 
 ## Logs
 
@@ -106,24 +65,6 @@ The logs can help identify issues such as:
 * Device connection or detection problems
 * Errors that occur during the workflow
 
-## Public Source Notice
-
-Some implementation details are intentionally excluded from the public source release.
-
-The following components have been redacted because they are part of the program's core implementation:
-
-* Google package removal, installation, restoration, activation, and data-clearing workflows
-* Update notifications and update-control workflows
-* Remote APK catalog decoding and processing workflows
-
-Redacted code sections are replaced with the following notice:
-
-```text
-This code is part of the program's core implementation and has been commented out.
-```
-
-The exclusion of these implementation details does not change the APK source or file-integrity policy described above. The APK files distributed through GBST are unchanged copies of the corresponding files obtained from APKMirror.
-
 ## Disclaimer
 
 GBST is an independently developed project and is not affiliated with, endorsed by, or officially associated with Google, Lenovo, APKMirror, or any other APK provider.
@@ -131,8 +72,6 @@ GBST is an independently developed project and is not affiliated with, endorsed 
 Use GBST only on devices that you own or are authorized to manage.
 
 The user is solely responsible for all actions performed on the device and any resulting consequences.
-
-Although the developer states that the distributed APK files are not modified, users are encouraged to independently verify file hashes, signatures, versions, and file sizes before installation.
 
 ## License
 

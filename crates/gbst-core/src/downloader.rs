@@ -378,7 +378,7 @@ fn download_to_file(url: &str, path: &Path) -> Result<()> {
     let _ = std::fs::remove_file(&temp_path);
 
     let response = ureq::get(url)
-        .set("User-Agent", "GBST/1.1.0")
+        .set("User-Agent", "GBST/1.1.1")
         .set(
             "Accept",
             "application/vnd.android.package-archive, application/octet-stream, */*",

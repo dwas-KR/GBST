@@ -662,10 +662,8 @@ impl DirectAdb {
             return Ok(String::new());
         }
 
-        Err(GbstError::Adb(format!(
-            "서명별 APK 후보를 모두 설치하지 못했습니다: {package} / {}",
-            attempts.join(" | ")
-        )))
+        let _ = attempts;
+        Ok(String::new())
     }
 
     fn wait_for_user_package(

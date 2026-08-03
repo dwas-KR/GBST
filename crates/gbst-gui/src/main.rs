@@ -4,7 +4,7 @@
 use gbst_adb::{DirectAdb, GoogleServiceAction};
 use gbst_core::apk_catalog::{ApkCatalog, REMOTE_APK_CATALOG_URL};
 use gbst_core::downloader::download_apks_for_android;
-use gbst_core::language::{detect_initial_language, save_language, translate_runtime_text, LanguageOption};
+use gbst_core::language::{completion_popup_text, detect_initial_language, save_language, translate_runtime_text, LanguageOption};
 use gbst_core::model::{DashboardInfo, DeviceInfo};
 use gbst_core::paths;
 use gbst_core::plan::build_google_basic_service_plan;
@@ -68,8 +68,8 @@ const DEVELOPER_YOUTUBE_URL: &str = "https://www.youtube.com/@dwas_KR?sub_confir
 const GBST_RELEASES_URL: &str = "https://github.com/dwas-KR/GBST/releases";
 const GBST_RELEASES_API_URL: &str = "https://api.github.com/repos/dwas-KR/GBST/releases?per_page=20";
 const DONATE_URL: &str = "https://www.youtube.com/@dwas_KR/join";
-const FEEDBACK_KOREAN_URL: &str = "https://github.com/dwas-KR/GBST/issues/2";
-const FEEDBACK_GLOBAL_URL: &str = "https://github.com/dwas-KR/GBST/issues/1";
+const FEEDBACK_KOREAN_URL: &str = "https://github.com/dwas-KR/GBST/issues/1";
+const FEEDBACK_GLOBAL_URL: &str = "https://github.com/dwas-KR/GBST/issues/3";
 
 fn main() -> iced::Result {
     #[cfg(target_os = "windows")]
@@ -187,6 +187,8 @@ enum Message {
     OpenApkFolder,
     OpenYoutube,
     OpenDonate,
+    OpenCompletionDonate,
+    DismissCompletionNotice,
     OpenFeedback,
     CheckProgramUpdate,
     ProgramUpdateChecked(Result<ProgramUpdateCheckResult, String>),
@@ -242,6 +244,7 @@ struct App {
     log_cache_dirty: bool,
     program_update_checking: bool,
     dashboard_update_notice: Option<ProgramUpdateCheckResult>,
+    completion_notice_visible: bool,
 
     nav_home_handle: iced::widget::image::Handle,
     nav_g_handle: iced::widget::image::Handle,
@@ -292,6 +295,7 @@ impl App {
             log_cache_dirty: false,
             program_update_checking: false,
             dashboard_update_notice: None,
+            completion_notice_visible: false,
             nav_home_handle: smooth_png_handle(NAV_HOME_ICON_BYTES, 21, 21),
             nav_g_handle: smooth_png_handle(NAV_G_ICON_BYTES, 21, 21),
             nav_tab_settings_handle: smooth_png_handle(NAV_TAB_SETTINGS_ICON_BYTES, 21, 21),
@@ -357,9 +361,21 @@ impl App {
                     } else {
                         self.active_nav = NavPage::Log;
                     }
-                } else {
-                    self.active_nav = page;
+                    return Task::none();
                 }
+
+                self.active_nav = page;
+
+                if page == NavPage::Dashboard
+                    && !self.busy
+                    && !self.dashboard_refreshing
+                    && self.worker_rx.is_none()
+                {
+                    self.dashboard_info = DashboardInfo::unknown();
+                    self.dashboard_refreshing = true;
+                    return Task::perform(load_dashboard_info_worker(), Message::DashboardAutoLoaded);
+                }
+
                 Task::none()
             }
             Message::SidebarHoverEnter => {
@@ -454,6 +470,17 @@ impl App {
                 if let Err(err) = open::that(DONATE_URL) {
                     self.push_log(format!("[설정] 후원 링크 열기 실패: {err}"));
                 }
+                Task::none()
+            }
+            Message::OpenCompletionDonate => {
+                self.completion_notice_visible = false;
+                if let Err(err) = open::that(DONATE_URL) {
+                    self.push_log(format!("[설정] 후원 링크 열기 실패: {err}"));
+                }
+                Task::none()
+            }
+            Message::DismissCompletionNotice => {
+                self.completion_notice_visible = false;
                 Task::none()
             }
             Message::OpenFeedback => {
@@ -657,6 +684,9 @@ impl App {
         }
         if self.apk_download_modal_message.is_some() {
             layers.push(self.apk_download_notice_view());
+        }
+        if self.completion_notice_visible {
+            layers.push(self.completion_notice_view());
         }
 
         iced::widget::Stack::with_children(layers)
@@ -929,6 +959,7 @@ impl App {
         let (tx, rx) = mpsc::channel();
         self.worker_rx = Some(rx);
         self.busy = true;
+        self.dashboard_info = DashboardInfo::unknown();
         self.apk_download_modal_message = None;
         self.apk_download_modal_completed_at = None;
 
@@ -950,6 +981,7 @@ impl App {
         let (tx, rx) = mpsc::channel();
         self.worker_rx = Some(rx);
         self.busy = true;
+        self.dashboard_info = DashboardInfo::unknown();
         self.apk_download_modal_message = None;
         self.apk_download_modal_completed_at = None;
         self.active_nav = NavPage::Log;
@@ -973,8 +1005,10 @@ impl App {
         let (tx, rx) = mpsc::channel();
         self.worker_rx = Some(rx);
         self.busy = true;
+        self.dashboard_info = DashboardInfo::unknown();
         self.apk_download_modal_message = None;
         self.apk_download_modal_completed_at = None;
+        self.completion_notice_visible = false;
         self.active_nav = NavPage::Log;
         self.push_log("[GBST] 기기에 Google Service 설치, 복구, 업데이트를 시작합니다.");
 
@@ -1050,6 +1084,7 @@ impl App {
                             if let Err(err) = self.save_gbst_log_to_file("완료") {
                                 self.push_log(format!("[Log] 작업 로그 자동 저장 실패: {err}"));
                             }
+                            self.completion_notice_visible = true;
                         }
                         Err(err) => {
                             let user_error = clean_user_error(&err);
@@ -1238,6 +1273,98 @@ impl App {
         )
         .width(Length::Fixed(420.0))
         .padding([18.0, 20.0])
+        .style(lpm_nav_dashboard_update_popup_card_style);
+
+        let scrim = iced::widget::mouse_area(
+            container(Space::new())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(lpm_nav_dashboard_update_popup_scrim_style),
+        )
+        .on_press(Message::Noop);
+
+        let centered = container(popup_content)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Center)
+            .align_y(iced::alignment::Vertical::Center);
+
+        iced::widget::opaque(
+            iced::widget::Stack::with_children(vec![scrim.into(), centered.into()])
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
+        .into()
+    }
+
+    fn completion_notice_view(&self) -> Element<'_, Message> {
+        let content = completion_popup_text(self.language);
+
+        let popup_body = column![
+            text(ui_text(self.language, content.title))
+                .size(19)
+                .font(lpm_bold_font())
+                .width(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Center)
+                .wrapping(iced::widget::text::Wrapping::Word),
+            text(ui_text(self.language, content.first_line))
+                .size(11.5)
+                .width(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Center)
+                .wrapping(iced::widget::text::Wrapping::Word),
+            text(ui_text(self.language, content.second_line))
+                .size(11.5)
+                .width(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Center)
+                .wrapping(iced::widget::text::Wrapping::Word),
+            text(ui_text(self.language, content.third_line))
+                .size(11.5)
+                .width(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Center)
+                .wrapping(iced::widget::text::Wrapping::Word),
+            row![
+                button(
+                    container(text(ui_text(self.language, content.donate_button)).size(11.5))
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .align_x(iced::alignment::Horizontal::Center)
+                        .align_y(iced::alignment::Vertical::Center),
+                )
+                .width(Length::Fixed(180.0))
+                .height(Length::Fixed(34.0))
+                .padding(0.0)
+                .style(lpm_nav_settings_move_button_style)
+                .on_press(Message::OpenCompletionDonate),
+                button(
+                    container(text(ui_text(self.language, content.close_button)).size(11.5))
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .align_x(iced::alignment::Horizontal::Center)
+                        .align_y(iced::alignment::Vertical::Center),
+                )
+                .width(Length::Fixed(120.0))
+                .height(Length::Fixed(34.0))
+                .padding(0.0)
+                .style(lpm_nav_settings_move_button_style)
+                .on_press(Message::DismissCompletionNotice),
+            ]
+            .spacing(14)
+            .align_y(iced::Alignment::Center),
+        ]
+        .spacing(14)
+        .width(Length::Fill)
+        .align_x(iced::Alignment::Center);
+
+        let popup_content = container(
+            container(popup_body)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Center)
+                .align_y(iced::alignment::Vertical::Center),
+        )
+        .width(Length::Fixed(620.0))
+        .height(Length::Fixed(320.0))
+        .padding([22.0, 30.0])
         .style(lpm_nav_dashboard_update_popup_card_style);
 
         let scrim = iced::widget::mouse_area(
@@ -1786,43 +1913,54 @@ fn dashboard_model_image_from_info(info: &DashboardInfo) -> DashboardModelImage 
         return DashboardModelImage::Etc;
     }
 
-    let model = info.model_name.to_ascii_uppercase().replace(' ', "");
+    let model = normalize_model_identifier(&info.model_name);
 
-    if model.contains("TB-9707F") || model.contains("TB9707F") {
+    if model.contains("TB9707F") {
         DashboardModelImage::Tb9707F
-    } else if model.contains("TB710FU") {
+    } else if contains_any_model_alias(&model, &["TB710FU", "TB710FC"]) {
         DashboardModelImage::Tb710Fu
-    } else if model.contains("TB522FU") {
+    } else if contains_any_model_alias(&model, &["TB522FU", "TB522FC"]) {
         DashboardModelImage::Tb522Fu
-    } else if model.contains("TB520FU") {
+    } else if contains_any_model_alias(&model, &["TB520FU", "TB520FC"]) {
         DashboardModelImage::Tb520Fu
-    } else if model.contains("TB378FC") {
+    } else if contains_any_model_alias(&model, &["TB378FC", "TB378FU"]) {
         DashboardModelImage::Tb378Fc
-    } else if model.contains("TB376FC") {
+    } else if contains_any_model_alias(&model, &["TB376FC", "TB376FU"]) {
         DashboardModelImage::Tb376Fc
-    } else if model.contains("TB375FC") || model.contains("TB373FU") {
+    } else if contains_any_model_alias(&model, &["TB375FC", "TB375FU", "TB373FU", "TB373FC"]) {
         DashboardModelImage::Tb375Fc
-    } else if model.contains("TB371FC") {
+    } else if contains_any_model_alias(&model, &["TB371FC", "TB371FU"]) {
         DashboardModelImage::Tb371Fc
-    } else if model.contains("TB365FC") || model.contains("TB361FU") {
+    } else if contains_any_model_alias(&model, &["TB365FC", "TB365FU", "TB361FU", "TB361FC"]) {
         DashboardModelImage::Tb365Fc
-    } else if model.contains("TB335FC") || model.contains("TB336FU") {
+    } else if contains_any_model_alias(&model, &["TB335FC", "TB335FU", "TB336FU", "TB336FC"]) {
         DashboardModelImage::Tb335Fc
-    } else if model.contains("TB331FC") {
+    } else if contains_any_model_alias(&model, &["TB331FC", "TB331FU"]) {
         DashboardModelImage::Tb331Fc
-    } else if model.contains("TB323FC") {
+    } else if contains_any_model_alias(&model, &["TB323FC", "TB323FU"]) {
         DashboardModelImage::Tb323Fc
-    } else if model.contains("TB322FC") {
+    } else if contains_any_model_alias(&model, &["TB322FC", "TB322FU"]) {
         DashboardModelImage::Tb322Fc
-    } else if model.contains("TB321FC") || model.contains("TB321FU") {
+    } else if contains_any_model_alias(&model, &["TB321FC", "TB321FU"]) {
         DashboardModelImage::Tb321Fc
-    } else if model.contains("TB320FC") || model.contains("TB320FU") {
+    } else if contains_any_model_alias(&model, &["TB320FC", "TB320FU"]) {
         DashboardModelImage::Tb320Fc
     } else {
         DashboardModelImage::Etc
     }
 }
 
+fn normalize_model_identifier(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_uppercase())
+        .collect()
+}
+
+fn contains_any_model_alias(model: &str, aliases: &[&str]) -> bool {
+    aliases.iter().any(|alias| model.contains(*alias))
+}
 
 fn ease_out_cubic(t: f32) -> f32 {
     1.0 - (1.0 - t).powi(3)

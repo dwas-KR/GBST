@@ -127,6 +127,117 @@ pub fn detect_initial_language() -> LanguageOption {
     LanguageOption::English
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct CompletionPopupText {
+    pub title: &'static str,
+    pub first_line: &'static str,
+    pub second_line: &'static str,
+    pub third_line: &'static str,
+    pub donate_button: &'static str,
+    pub close_button: &'static str,
+}
+
+pub fn completion_popup_text(language: LanguageOption) -> CompletionPopupText {
+    match language {
+        LanguageOption::Korean => CompletionPopupText {
+            title: "작업이 정상적으로 완료되었습니다.",
+            first_line: "GBST를 이용해 주셔서 감사합니다. 이 프로그램은 누구나 무료로 사용할 수 있도록 개인 개발자가 지속적으로 관리하고 있습니다.",
+            second_line: "Google 서비스 문제가 해결되었다면, 선택적인 후원으로 앞으로의 개발을 함께 응원해 주세요.",
+            third_line: "소중한 후원은 테스트 기기 구입, 신규 버전 지원, 오류 수정과 프로그램 개선에 사용됩니다.",
+            donate_button: "개발 후원하기",
+            close_button: "닫기",
+        },
+        LanguageOption::English => CompletionPopupText {
+            title: "The task completed successfully.",
+            first_line: "Thank you for using GBST. This program is continuously maintained by an independent developer so that anyone can use it free of charge.",
+            second_line: "If your Google Services issue has been resolved, please consider supporting future development with an optional donation.",
+            third_line: "Your support helps purchase test devices, add support for new versions, fix errors, and improve the program.",
+            donate_button: "Support Development",
+            close_button: "Close",
+        },
+        LanguageOption::Russian => CompletionPopupText {
+            title: "Задача успешно завершена.",
+            first_line: "Спасибо, что пользуетесь GBST. Независимый разработчик постоянно поддерживает программу, чтобы любой желающий мог пользоваться ею бесплатно.",
+            second_line: "Если проблема с сервисами Google решена, вы можете по желанию поддержать дальнейшую разработку пожертвованием.",
+            third_line: "Ваша поддержка будет направлена на покупку тестовых устройств, поддержку новых версий, исправление ошибок и улучшение программы.",
+            donate_button: "Поддержать разработку",
+            close_button: "Закрыть",
+        },
+        LanguageOption::Japanese => CompletionPopupText {
+            title: "作業が正常に完了しました。",
+            first_line: "GBSTをご利用いただきありがとうございます。本プログラムは、誰でも無料で利用できるよう、個人開発者が継続的に管理しています。",
+            second_line: "Googleサービスの問題が解決した場合は、任意のご支援で今後の開発を応援していただけると幸いです。",
+            third_line: "いただいたご支援は、テスト端末の購入、新しいバージョンへの対応、不具合修正、プログラム改善に活用されます。",
+            donate_button: "開発を支援する",
+            close_button: "閉じる",
+        },
+        LanguageOption::TraditionalChinese => CompletionPopupText {
+            title: "作業已順利完成。",
+            first_line: "感謝您使用 GBST。本程式由個人開發者持續維護，讓所有人都能免費使用。",
+            second_line: "若 Google 服務問題已解決，歡迎透過自願贊助支持後續開發。",
+            third_line: "您的寶貴贊助將用於購買測試裝置、支援新版本、修正錯誤及改善程式。",
+            donate_button: "贊助開發",
+            close_button: "關閉",
+        },
+        LanguageOption::Vietnamese => CompletionPopupText {
+            title: "Đã hoàn tất tác vụ thành công.",
+            first_line: "Cảm ơn bạn đã sử dụng GBST. Chương trình được một nhà phát triển độc lập duy trì liên tục để mọi người đều có thể sử dụng miễn phí.",
+            second_line: "Nếu sự cố Google Services đã được khắc phục, bạn có thể tùy chọn ủng hộ để đồng hành cùng quá trình phát triển trong tương lai.",
+            third_line: "Sự ủng hộ quý báu sẽ được dùng để mua thiết bị thử nghiệm, hỗ trợ phiên bản mới, sửa lỗi và cải thiện chương trình.",
+            donate_button: "Ủng hộ phát triển",
+            close_button: "Đóng",
+        },
+        LanguageOption::Greek => CompletionPopupText {
+            title: "Η εργασία ολοκληρώθηκε με επιτυχία.",
+            first_line: "Σας ευχαριστούμε που χρησιμοποιείτε το GBST. Το πρόγραμμα συντηρείται συνεχώς από έναν ανεξάρτητο προγραμματιστή ώστε να είναι δωρεάν για όλους.",
+            second_line: "Αν το πρόβλημα με τις Υπηρεσίες Google επιλύθηκε, μπορείτε προαιρετικά να στηρίξετε τη μελλοντική ανάπτυξη με μια δωρεά.",
+            third_line: "Η πολύτιμη υποστήριξή σας χρησιμοποιείται για αγορά συσκευών δοκιμών, υποστήριξη νέων εκδόσεων, διόρθωση σφαλμάτων και βελτίωση του προγράμματος.",
+            donate_button: "Στήριξη ανάπτυξης",
+            close_button: "Κλείσιμο",
+        },
+        LanguageOption::Hindi => CompletionPopupText {
+            title: "कार्य सफलतापूर्वक पूरा हो गया है।",
+            first_line: "GBST का उपयोग करने के लिए धन्यवाद। यह प्रोग्राम एक स्वतंत्र डेवलपर द्वारा लगातार बनाए रखा जाता है ताकि हर कोई इसे निःशुल्क उपयोग कर सके।",
+            second_line: "यदि Google Services की समस्या हल हो गई है, तो आप वैकल्पिक दान के माध्यम से भविष्य के विकास का समर्थन कर सकते हैं।",
+            third_line: "आपका मूल्यवान सहयोग परीक्षण डिवाइस खरीदने, नए संस्करणों का समर्थन करने, त्रुटियाँ ठीक करने और प्रोग्राम में सुधार करने के लिए उपयोग किया जाएगा।",
+            donate_button: "विकास का समर्थन करें",
+            close_button: "बंद करें",
+        },
+        LanguageOption::Georgian => CompletionPopupText {
+            title: "სამუშაო წარმატებით დასრულდა.",
+            first_line: "გმადლობთ GBST-ის გამოყენებისთვის. პროგრამას დამოუკიდებელი დეველოპერი მუდმივად უვლის, რათა მისი უფასოდ გამოყენება ყველას შეეძლოს.",
+            second_line: "თუ Google Services-ის პრობლემა მოგვარდა, სურვილის შემთხვევაში შეგიძლიათ შემოწირულობით მხარი დაუჭიროთ მომავალ განვითარებას.",
+            third_line: "თქვენი მხარდაჭერა მოხმარდება სატესტო მოწყობილობების შეძენას, ახალი ვერსიების მხარდაჭერას, შეცდომების გამოსწორებასა და პროგრამის გაუმჯობესებას.",
+            donate_button: "განვითარების მხარდაჭერა",
+            close_button: "დახურვა",
+        },
+        LanguageOption::Dutch => CompletionPopupText {
+            title: "De taak is succesvol voltooid.",
+            first_line: "Bedankt dat u GBST gebruikt. Dit programma wordt voortdurend onderhouden door een onafhankelijke ontwikkelaar, zodat iedereen het gratis kan gebruiken.",
+            second_line: "Is het probleem met Google Services opgelost, dan kunt u de verdere ontwikkeling vrijwillig steunen met een donatie.",
+            third_line: "Uw waardevolle steun wordt gebruikt voor testapparaten, ondersteuning van nieuwe versies, foutoplossingen en verbeteringen aan het programma.",
+            donate_button: "Ontwikkeling steunen",
+            close_button: "Sluiten",
+        },
+        LanguageOption::Arabic => CompletionPopupText {
+            title: "اكتملت المهمة بنجاح.",
+            first_line: "شكرًا لاستخدامك GBST. يعمل مطوّر مستقل باستمرار على صيانة البرنامج ليظل متاحًا للجميع مجانًا.",
+            second_line: "إذا تم حل مشكلة خدمات Google، فيمكنك دعم التطوير المستقبلي بتبرع اختياري.",
+            third_line: "سيُستخدم دعمك القيّم لشراء أجهزة الاختبار، ودعم الإصدارات الجديدة، وإصلاح الأخطاء، وتحسين البرنامج.",
+            donate_button: "دعم التطوير",
+            close_button: "إغلاق",
+        },
+        LanguageOption::Spanish => CompletionPopupText {
+            title: "La tarea se completó correctamente.",
+            first_line: "Gracias por utilizar GBST. Un desarrollador independiente mantiene continuamente este programa para que cualquier persona pueda usarlo gratis.",
+            second_line: "Si se resolvió el problema de Google Services, puedes apoyar de forma opcional el desarrollo futuro mediante una donación.",
+            third_line: "Tu valioso apoyo se destinará a comprar dispositivos de prueba, admitir nuevas versiones, corregir errores y mejorar el programa.",
+            donate_button: "Apoyar el desarrollo",
+            close_button: "Cerrar",
+        },
+    }
+}
+
 pub fn t(language: LanguageOption, key: &str) -> &'static str {
     let ko = language == LanguageOption::Korean;
     match key {

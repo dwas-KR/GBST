@@ -26,8 +26,12 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const ADB_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const ADB_POLL_INTERVAL: Duration = Duration::from_secs(1);
-const ADB_CONNECT_RETRY_ATTEMPTS: usize = 3;
-const ADB_CONNECT_RETRY_BACKOFF: Duration = Duration::from_millis(150);
+const ADB_CONNECT_RETRY_ATTEMPTS: usize = 5;
+const ADB_CONNECT_RETRY_BACKOFF: Duration = Duration::from_millis(400);
+const ADB_TRANSPORT_RETRY_ATTEMPTS: usize = 5;
+const ADB_TRANSPORT_RETRY_BACKOFF: Duration = Duration::from_millis(900);
+const ADB_PUSH_RETRY_ATTEMPTS: usize = 5;
+const ADB_PUSH_RETRY_BACKOFF: Duration = Duration::from_millis(1200);
 const ADB_SERVER_ADDR: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 5037);
 const ADB_SERVER_PROBE_TIMEOUT: Duration = Duration::from_millis(150);
 const SPINNER_FRAMES: [&str; 4] = ["│", "╱", "━", "╲"];
@@ -274,11 +278,7 @@ impl DirectAdb {
 
     pub fn read_device_info(&mut self) -> Result<DeviceInfo> {
         let manufacturer = self.shell("getprop ro.product.manufacturer")?.trim().to_string();
-        let model = self
-            .shell("getprop ro.product.vendor.model")
-            .or_else(|_| self.shell("getprop ro.product.model"))?
-            .trim()
-            .to_string();
+        let model = self.read_model_identity();
         let android_version = self.shell("getprop ro.build.version.release")?.trim().to_string();
 
         if !manufacturer.eq_ignore_ascii_case("Lenovo") {
@@ -322,29 +322,24 @@ impl DirectAdb {
             "Lenovo 기기가 아닙니다.".to_string()
         };
 
-        let display_name = self
-            .shell("getprop ro.product.display")
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        let device_code = self
-            .shell("getprop ro.product.device")
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        let fallback_model = self
-            .shell("getprop ro.product.vendor.model")
-            .or_else(|_| self.shell("getprop ro.product.model"))
-            .unwrap_or_default()
-            .trim()
-            .to_string();
+        let display_name = self.read_first_non_empty_property(&[
+            "ro.product.display",
+            "ro.product.vendor.name",
+            "ro.product.name",
+        ]);
+        let model_identity = self.read_model_identity();
+        let normalized_display = normalize_model_property(&display_name);
+        let normalized_identity = normalize_model_property(&model_identity);
 
-        info.model_name = if !display_name.is_empty() && !device_code.is_empty() {
-            format!("{display_name} ({device_code})")
+        info.model_name = if !display_name.is_empty()
+            && !model_identity.is_empty()
+            && !normalized_display.contains(&normalized_identity)
+        {
+            format!("{display_name} ({model_identity})")
         } else if !display_name.is_empty() {
             display_name
-        } else if !fallback_model.is_empty() {
-            fallback_model
+        } else if !model_identity.is_empty() {
+            model_identity
         } else {
             "알 수 없음".to_string()
         };
@@ -394,6 +389,49 @@ impl DirectAdb {
 
     pub fn shell(&mut self, command: &str) -> Result<String> {
         self.shell_inner(command)
+    }
+
+    fn read_first_non_empty_property(&mut self, properties: &[&str]) -> String {
+        for property in properties {
+            let value = self
+                .shell(&format!("getprop {property}"))
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if !value.is_empty() {
+                return value;
+            }
+        }
+        String::new()
+    }
+
+    fn read_model_identity(&mut self) -> String {
+        let properties = [
+            "ro.product.vendor.model",
+            "ro.product.model",
+            "ro.product.product.model",
+            "ro.product.device",
+            "ro.product.vendor.device",
+            "ro.product.product.device",
+        ];
+        let mut values = Vec::new();
+
+        for property in properties {
+            let value = self
+                .shell(&format!("getprop {property}"))
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if !value.is_empty() && !values.iter().any(|existing| existing == &value) {
+                values.push(value);
+            }
+        }
+
+        if let Some(code) = detect_supported_lenovo_model_code(&values) {
+            return code.to_string();
+        }
+
+        values.into_iter().next().unwrap_or_default()
     }
 
     pub fn read_screen_off_timeout(&mut self) -> Result<String> {
@@ -555,30 +593,44 @@ impl DirectAdb {
     }
 
     fn shell_inner(&mut self, command: &str) -> Result<String> {
-        let device = self.connect_device()?;
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
+        let mut last_error: Option<String> = None;
 
-        let result = device.shell_command(
-            &command,
-            Some(&mut stdout as &mut dyn Write),
-            Some(&mut stderr as &mut dyn Write),
-        );
+        for attempt in 0..ADB_TRANSPORT_RETRY_ATTEMPTS {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
 
-        match result {
-            Ok(_) => Ok(String::from_utf8_lossy(&stdout).trim().to_string()),
-            Err(err) => {
-                self.drop_device();
-                let stderr_text = String::from_utf8_lossy(&stderr).trim().to_string();
-                if stderr_text.is_empty() {
-                    Err(GbstError::Adb(format!("ADB shell 실패 `{command}`: {err}")))
-                } else {
-                    Err(GbstError::Adb(format!(
-                        "ADB shell 실패 `{command}`: {err} / stderr={stderr_text}"
-                    )))
+            let result = match self.connect_device() {
+                Ok(device) => device
+                    .shell_command(
+                        &command,
+                        Some(&mut stdout as &mut dyn Write),
+                        Some(&mut stderr as &mut dyn Write),
+                    )
+                    .map_err(|err| err.to_string()),
+                Err(err) => Err(err.to_string()),
+            };
+
+            match result {
+                Ok(_) => return Ok(String::from_utf8_lossy(&stdout).trim().to_string()),
+                Err(err) => {
+                    self.drop_device();
+                    let stderr_text = String::from_utf8_lossy(&stderr).trim().to_string();
+                    last_error = Some(if stderr_text.is_empty() {
+                        format!("ADB shell 실패 `{command}`: {err}")
+                    } else {
+                        format!("ADB shell 실패 `{command}`: {err} / stderr={stderr_text}")
+                    });
+
+                    if attempt + 1 < ADB_TRANSPORT_RETRY_ATTEMPTS {
+                        thread::sleep(ADB_TRANSPORT_RETRY_BACKOFF);
+                    }
                 }
             }
         }
+
+        Err(GbstError::Adb(last_error.unwrap_or_else(|| {
+            format!("ADB shell 실패 `{command}`: 알 수 없는 전송 오류")
+        })))
     }
 
     pub fn install_apk_with_pm(&mut self, apk_path: &Path) -> Result<String> {
@@ -596,20 +648,42 @@ impl DirectAdb {
         let remote_path = format!("{remote_dir}/{file_name}");
 
         self.shell(&format!("mkdir -p {remote_dir}"))?;
-
-        let mut file = File::open(apk_path)?;
-        self.connect_device()?
-            .push(&mut file as &mut dyn Read, &remote_path)
-            .map_err(|err| {
-                GbstError::Adb(format!(
-                    "APK push 실패: {} -> {remote_path}: {err}",
-                    apk_path.display()
-                ))
-            })?;
+        self.push_file_with_retry(apk_path, &remote_path)?;
 
         let output = self.shell(&format!("pm install -r -d -g --user 0 {remote_path}"));
         let _ = self.shell(&format!("rm -f {remote_path}"));
         output
+    }
+
+    fn push_file_with_retry(&mut self, apk_path: &Path, remote_path: &str) -> Result<()> {
+        let mut last_error: Option<String> = None;
+
+        for attempt in 0..ADB_PUSH_RETRY_ATTEMPTS {
+            let mut file = File::open(apk_path)?;
+            let result = match self.connect_device() {
+                Ok(device) => device
+                    .push(&mut file as &mut dyn Read, &remote_path)
+                    .map_err(|err| err.to_string()),
+                Err(err) => Err(err.to_string()),
+            };
+
+            match result {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    self.drop_device();
+                    last_error = Some(err);
+                    if attempt + 1 < ADB_PUSH_RETRY_ATTEMPTS {
+                        thread::sleep(ADB_PUSH_RETRY_BACKOFF);
+                    }
+                }
+            }
+        }
+
+        Err(GbstError::Adb(format!(
+            "APK push 실패: {} -> {remote_path}: {}",
+            apk_path.display(),
+            last_error.unwrap_or_else(|| "알 수 없는 전송 오류".to_string())
+        )))
     }
 
     pub fn install_apk_candidates_with_pm(
@@ -1125,11 +1199,17 @@ impl DirectAdb {
                 match ADBUSBDevice::autodetect_with_custom_private_key(key_path.clone()) {
                     Ok(mut device) => {
                         let mut stdout = Vec::new();
-                        let _ = device.shell_command(
+                        if let Err(err) = device.shell_command(
                             &"getprop ro.serialno",
                             Some(&mut stdout as &mut dyn Write),
                             None,
-                        );
+                        ) {
+                            last_error = Some(err.to_string());
+                            if attempt + 1 < ADB_CONNECT_RETRY_ATTEMPTS {
+                                thread::sleep(ADB_CONNECT_RETRY_BACKOFF);
+                            }
+                            continue;
+                        }
                         let serial = String::from_utf8_lossy(&stdout).trim().to_string();
                         if !serial.is_empty() {
                             self.serial = Some(serial);
@@ -1172,8 +1252,68 @@ impl DirectAdb {
 
     fn drop_device(&mut self) {
         self.device = None;
+        self.serial = None;
         self.cached_bootmode = None;
     }
+}
+
+fn normalize_model_property(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_uppercase())
+        .collect()
+}
+
+fn detect_supported_lenovo_model_code(values: &[String]) -> Option<&'static str> {
+    const MODEL_ALIASES: &[(&str, &str)] = &[
+        ("TB9707F", "TB-9707F"),
+        ("TB710FU", "TB710FU"),
+        ("TB710FC", "TB710FU"),
+        ("TB522FU", "TB522FU"),
+        ("TB522FC", "TB522FU"),
+        ("TB520FU", "TB520FU"),
+        ("TB520FC", "TB520FU"),
+        ("TB378FC", "TB378FC"),
+        ("TB378FU", "TB378FC"),
+        ("TB376FC", "TB376FC"),
+        ("TB376FU", "TB376FC"),
+        ("TB375FC", "TB375FC"),
+        ("TB375FU", "TB375FC"),
+        ("TB373FU", "TB375FC"),
+        ("TB373FC", "TB375FC"),
+        ("TB371FC", "TB371FC"),
+        ("TB371FU", "TB371FC"),
+        ("TB365FC", "TB365FC"),
+        ("TB365FU", "TB365FC"),
+        ("TB361FU", "TB365FC"),
+        ("TB361FC", "TB365FC"),
+        ("TB335FC", "TB335FC"),
+        ("TB335FU", "TB335FC"),
+        ("TB336FU", "TB335FC"),
+        ("TB336FC", "TB335FC"),
+        ("TB331FC", "TB331FC"),
+        ("TB331FU", "TB331FC"),
+        ("TB323FC", "TB323FC"),
+        ("TB323FU", "TB323FC"),
+        ("TB322FC", "TB322FC"),
+        ("TB322FU", "TB322FC"),
+        ("TB321FC", "TB321FC"),
+        ("TB321FU", "TB321FC"),
+        ("TB320FC", "TB320FC"),
+        ("TB320FU", "TB320FC"),
+    ];
+
+    for value in values {
+        let normalized = normalize_model_property(value);
+        for &(alias, canonical) in MODEL_ALIASES {
+            if normalized.contains(alias) {
+                return Some(canonical);
+            }
+        }
+    }
+
+    None
 }
 
 impl Default for DirectAdb {
@@ -1187,27 +1327,18 @@ pub fn ensure_adb_key() -> Result<PathBuf> {
     let _ = paths::ensure_runtime_directories();
 
     let stable_path = paths::stable_adb_key_path();
-    let runtime_path = paths::runtime_adb_key_path();
     let lpmbox_path = paths::lpmbox_adb_key_path();
 
     if stable_path.is_file() {
-        mirror_key_pair(&stable_path, &runtime_path);
-        return Ok(stable_path);
-    }
-
-    if runtime_path.is_file() {
-        copy_key_pair(&runtime_path, &stable_path)?;
         return Ok(stable_path);
     }
 
     if lpmbox_path.is_file() {
         copy_key_pair(&lpmbox_path, &stable_path)?;
-        mirror_key_pair(&stable_path, &runtime_path);
         return Ok(stable_path);
     }
 
     generate_key_pair(&stable_path)?;
-    mirror_key_pair(&stable_path, &runtime_path);
     Ok(stable_path)
 }
 
@@ -1242,14 +1373,6 @@ fn copy_key_pair(from: &Path, to: &Path) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn mirror_key_pair(from: &Path, to: &Path) {
-    if to.is_file() {
-        return;
-    }
-
-    let _ = copy_key_pair(from, to);
 }
 
 fn prepare_adb_usb_environment() {

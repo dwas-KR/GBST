@@ -65,14 +65,6 @@ The logs can help identify issues such as:
 * Device connection or detection problems
 * Errors that occur during the workflow
 
-## Disclaimer
-
-GBST is an independently developed project and is not affiliated with, endorsed by, or officially associated with Google, Lenovo, APKMirror, or any other APK provider.
-
-Use GBST only on devices that you own or are authorized to manage.
-
-The user is solely responsible for all actions performed on the device and any resulting consequences.
-
 ## License
 This work is licensed under the **Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License (CC BY-NC-SA 4.0)**. However, components included with or used by GBST may be subject to separate licenses and distribution terms, which users are responsible for reviewing and complying with.
 

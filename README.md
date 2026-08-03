@@ -74,13 +74,12 @@ Use GBST only on devices that you own or are authorized to manage.
 The user is solely responsible for all actions performed on the device and any resulting consequences.
 
 ## License
+This work is licensed under the **Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License (CC BY-NC-SA 4.0)**. However, components included with or used by GBST may be subject to separate licenses and distribution terms, which users are responsible for reviewing and complying with.
 
-> Components included with or used by GBST may be subject to their own licenses and distribution terms. Please review and comply with those terms separately.
->
-> This work is licensed under the
-> **Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License (CC BY-NC-SA 4.0)**.
->
-> For full details, see the `LICENSE` file or visit:
-> https://creativecommons.org/licenses/by-nc-sa/4.0/
->
-> [![CC BY-NC-SA 4.0][cc-by-nc-sa-image]][cc-by-nc-sa]
+This work is licensed under the  
+**Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)**.
+
+For full details, see the `LICENSE` file or visit
+[https://creativecommons.org/licenses/by-nc-sa/4.0/](https://creativecommons.org/licenses/by-nc-sa/4.0/)
+
+[![CC BY-NC-SA 4.0][cc-by-nc-sa-image]][cc-by-nc-sa]

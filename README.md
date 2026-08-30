@@ -18,7 +18,8 @@ Reference project: https://github.com/dwas-KR/LPMBox/tree/main
 
 ## APK Source and File Integrity
 
-The APK files used by GBST are obtained through the following process:
+The APK files used by GBST are obtained through the following process.
+Link: https://github.com/dwas-KR/GBST-APK/releases
 
 1. The original APK files are downloaded from **APKMirror**.
 2. The downloaded files are stored on the developer's personal drive for reliable distribution.

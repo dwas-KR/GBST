@@ -112,6 +112,12 @@ fn validate_required_packages(android: u32, by_package: &BTreeMap<String, Vec<Pa
         PKG_GSF,
         PKG_VENDING,
     ] {
+        if android == 17
+            && matches!(package, PKG_PRINT_RECOMMENDATION | PKG_ONE_TIME_INITIALIZER)
+        {
+            continue;
+        }
+
         if !by_package.contains_key(package) {
             return Err(GbstError::MissingPackage {
                 android,
@@ -234,6 +240,7 @@ fn push_google_restore_stage_1(
     steps: &mut Vec<PlanStep>,
     by_package: &BTreeMap<String, Vec<PathBuf>>,
 ) -> Result<()> {
+    push_wakeup_key_sequence(steps);
     push_shell(steps, "PartnerSetup 제거", format!("pm uninstall --user 0 {PKG_PARTNER_SETUP}"));
     push_shell(steps, "Google ext.shared 제거", format!("pm uninstall --user 0 {PKG_EXT_SHARED}"));
     push_shell(steps, "ConfigUpdater 제거", format!("pm uninstall --user 0 {PKG_CONFIG_UPDATER}"));
@@ -243,8 +250,12 @@ fn push_google_restore_stage_1(
 
     push_install_all(steps, by_package, PKG_PARTNER_SETUP, FailurePolicy::Stop)?;
     push_install_all(steps, by_package, PKG_CONFIG_UPDATER, FailurePolicy::Stop)?;
-    push_install_all(steps, by_package, PKG_ONE_TIME_INITIALIZER, FailurePolicy::Stop)?;
-    push_install_all(steps, by_package, PKG_PRINT_RECOMMENDATION, FailurePolicy::Stop)?;
+    if by_package.contains_key(PKG_ONE_TIME_INITIALIZER) {
+        push_install_all(steps, by_package, PKG_ONE_TIME_INITIALIZER, FailurePolicy::Stop)?;
+    }
+    if by_package.contains_key(PKG_PRINT_RECOMMENDATION) {
+        push_install_all(steps, by_package, PKG_PRINT_RECOMMENDATION, FailurePolicy::Stop)?;
+    }
     push_delay(steps, "Google 서비스 복구 루틴 1 설치 후 2초 대기", 2);
 
     for package in [
@@ -299,6 +310,7 @@ fn push_google_restore_stage_2(
     steps: &mut Vec<PlanStep>,
     by_package: &BTreeMap<String, Vec<PathBuf>>,
 ) -> Result<()> {
+    push_wakeup_key_sequence(steps);
     push_shell(steps, "Play Store 제거", format!("pm uninstall --user 0 {PKG_VENDING}"));
     push_shell(steps, "Google Play Services 제거", format!("pm uninstall --user 0 {PKG_GMS}"));
     push_delay(steps, "Google 서비스 복구 루틴 2 삭제 후 2초 대기", 2);
@@ -334,6 +346,7 @@ fn push_google_restore_stage_3(
     steps: &mut Vec<PlanStep>,
     by_package: &BTreeMap<String, Vec<PathBuf>>,
 ) -> Result<()> {
+    push_wakeup_key_sequence(steps);
     push_shell(steps, "Google Services Framework 제거", format!("pm uninstall --user 0 {PKG_GSF}"));
     push_delay(steps, "Google 서비스 복구 루틴 3 삭제 후 2초 대기", 2);
 
@@ -354,6 +367,7 @@ fn push_google_restore_stage_3(
 }
 
 fn push_google_restore_stage_4(steps: &mut Vec<PlanStep>) {
+    push_wakeup_key_sequence(steps);
     push_allow_all_for_google_packages(steps);
     push_ota_disable_steps(steps);
     push_delay(steps, "Google 서비스 복구 루틴 4 권한 부여 후 2초 대기", 2);
@@ -403,6 +417,42 @@ fn push_final_google_services_followup_steps(steps: &mut Vec<PlanStep>) {
     push_shell(steps, "Play Store 초기 설정 키 이벤트 93", "input keyevent 93");
     push_shell(steps, "Play Store 초기 설정 대기 0.3초", "sleep 0.3");
     push_shell(steps, "Play Store 초기 설정 키 이벤트 117", "input keyevent 117");
-    push_shell(steps, "작업 후 화면 밝기 복구", "settings put system screen_brightness 70");
     push_shell(steps, "Android 설정 앱 열기", "am start -n com.android.settings/.Settings");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn path_map(packages: &[&str]) -> BTreeMap<String, Vec<PathBuf>> {
+        packages
+            .iter()
+            .map(|package| ((*package).to_string(), vec![PathBuf::from(format!("{package}.apk"))]))
+            .collect()
+    }
+
+    #[test]
+    fn android17_allows_catalog_placeholders_for_system_packages() {
+        let by_package = path_map(&[
+            PKG_CONFIG_UPDATER,
+            PKG_PARTNER_SETUP,
+            PKG_GMS,
+            PKG_GSF,
+            PKG_VENDING,
+        ]);
+        assert!(validate_required_packages(17, &by_package).is_ok());
+    }
+
+    #[test]
+    fn android16_still_requires_onetime_and_printservice_apks() {
+        let by_package = path_map(&[
+            PKG_CONFIG_UPDATER,
+            PKG_PARTNER_SETUP,
+            PKG_GMS,
+            PKG_GSF,
+            PKG_VENDING,
+        ]);
+        assert!(validate_required_packages(16, &by_package).is_err());
+    }
+}
+

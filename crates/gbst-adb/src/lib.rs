@@ -458,6 +458,48 @@ impl DirectAdb {
         Ok(())
     }
 
+    pub fn read_screen_brightness(&mut self) -> Result<u32> {
+        for command in [
+            "settings get system screen_brightness",
+            "settings get --user 0 system screen_brightness",
+        ] {
+            if let Ok(output) = self.shell(command) {
+                if let Some(value) = parse_screen_brightness_value(&output) {
+                    return Ok(value);
+                }
+            }
+        }
+
+        for command in [
+            "cmd display get-brightness",
+            "settings get --user 0 system screen_brightness_float",
+            "settings get system screen_brightness_float",
+        ] {
+            if let Ok(output) = self.shell(command) {
+                if let Some(value) = parse_screen_brightness_float(&output) {
+                    return Ok(value);
+                }
+            }
+        }
+
+        Err(GbstError::Adb(
+            "기기의 화면 밝기 값을 올바르게 읽지 못했습니다.".to_string(),
+        ))
+    }
+
+    pub fn restore_screen_brightness(&mut self, brightness: u32) -> Result<()> {
+        if brightness > 4095 {
+            return Err(GbstError::Adb(format!(
+                "screen_brightness 복원 값이 올바르지 않습니다: {brightness}"
+            )));
+        }
+
+        let _ = self.shell(&format!(
+            "settings put system screen_brightness {brightness}"
+        ))?;
+        Ok(())
+    }
+
     pub fn assess_google_services_from_downloaded_apks(&mut self, apks: &[LocalApk]) -> GoogleServiceAction {
         let local_versions = apk_version_code_candidates_from_local_apks(apks);
         self.assess_google_services_with_versions(&local_versions)
@@ -653,6 +695,11 @@ impl DirectAdb {
         let output = self.shell(&format!("pm install -r -d -g --user 0 {remote_path}"));
         let _ = self.shell(&format!("rm -f {remote_path}"));
         output
+    }
+
+    pub fn cleanup_gbst_temp_files(&mut self) -> Result<()> {
+        let _ = self.shell("rm -rf /data/local/tmp/gbst")?;
+        Ok(())
     }
 
     fn push_file_with_retry(&mut self, apk_path: &Path, remote_path: &str) -> Result<()> {
@@ -1056,28 +1103,33 @@ impl DirectAdb {
                         Err(err) => return Err(err),
                     }
                 }
-                PlanStep::RebootAndWait { policy, .. } => {
-                    match self.reboot_and_wait_once(|line| on_log(line)) {
-                        Ok(()) => {
-                            if plan.android_major == AndroidMajor::Android13 {
-                                on_log("[ADB] Android 13 추가 재부팅을 진행합니다.".to_string());
-                                match self.reboot_and_wait_once(|line| on_log(line)) {
-                                    Ok(()) => {}
-                                    Err(err) if *policy == FailurePolicy::Continue => {
-                                        if should_show_recoverable_error("Android 13 추가 재부팅", &err.to_string()) {
-                                            on_log(format!("    [경고] Android 13 추가 재부팅 실패, 계속 진행: {err}"));
-                                        }
-                                    }
-                                    Err(err) => return Err(err),
-                                }
-                            }
+                PlanStep::RebootAndWait { label, policy } => {
+                    let reboot_count = reboot_count_for_step(plan.android_major, label);
+                    let mut reboot_error = None;
+
+                    for reboot_index in 0..reboot_count {
+                        if reboot_count > 1 {
+                            on_log(format!(
+                                "[ADB] Android 13 단계 재부팅 {}/{}을 진행합니다.",
+                                reboot_index + 1,
+                                reboot_count
+                            ));
                         }
-                        Err(err) if *policy == FailurePolicy::Continue => {
+
+                        if let Err(err) = self.reboot_and_wait_once(|line| on_log(line)) {
+                            reboot_error = Some(err);
+                            break;
+                        }
+                    }
+
+                    if let Some(err) = reboot_error {
+                        if *policy == FailurePolicy::Continue {
                             if should_show_recoverable_error("재부팅", &err.to_string()) {
                                 on_log(format!("    [경고] 재부팅 실패, 계속 진행: {err}"));
                             }
+                        } else {
+                            return Err(err);
                         }
-                        Err(err) => return Err(err),
                     }
                 }
                 PlanStep::GrantRequestedPermissions {
@@ -1881,6 +1933,59 @@ fn google_stage_complete_log(stage: u8) -> String {
     )
 }
 
+fn parse_screen_brightness_value(output: &str) -> Option<u32> {
+    for line in output.lines() {
+        let value = line.trim();
+        if value.is_empty() || value.eq_ignore_ascii_case("null") {
+            continue;
+        }
+        if !value.chars().all(|ch| ch.is_ascii_digit()) {
+            continue;
+        }
+
+        if let Ok(parsed) = value.parse::<u32>() {
+            if parsed <= 4095 {
+                return Some(parsed);
+            }
+        }
+    }
+
+    None
+}
+
+fn parse_screen_brightness_float(output: &str) -> Option<u32> {
+    for token in output.split(|ch: char| {
+        !(ch.is_ascii_digit() || ch == '.' || ch == '-' || ch == '+')
+    }) {
+        let token = token.trim();
+        if token.is_empty() || !token.contains('.') {
+            continue;
+        }
+
+        if let Ok(value) = token.parse::<f64>() {
+            if (0.0..=1.0).contains(&value) {
+                return Some((value * 255.0).round() as u32);
+            }
+        }
+    }
+
+    None
+}
+
+fn reboot_count_for_step(android_major: AndroidMajor, label: &str) -> usize {
+    if android_major != AndroidMajor::Android13 {
+        return 1;
+    }
+
+    match label {
+        "사전 준비 재부팅" => 2,
+        "Google 서비스 복구 루틴 1 완료 후 재부팅" => 3,
+        "Google 서비스 복구 루틴 2 완료 후 재부팅" => 3,
+        "Google 서비스 복구 루틴 3 완료 후 재부팅" => 2,
+        _ => 1,
+    }
+}
+
 fn spinner_log(key: &str, message: &str) -> String {
     format!("__SPINNER__|{key}|{message}")
 }
@@ -1898,4 +2003,34 @@ fn is_adbd_dropped_after_reboot(message: &str) -> bool {
         || lower.contains("i/o error")
         || lower.contains("closed")
         || lower.contains("reset")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_only_sane_screen_brightness_values() {
+        assert_eq!(parse_screen_brightness_value("80\r\n"), Some(80));
+        assert_eq!(parse_screen_brightness_value(" 255 "), Some(255));
+        assert_eq!(parse_screen_brightness_value("2568723"), None);
+        assert_eq!(parse_screen_brightness_value("null"), None);
+    }
+
+    #[test]
+    fn converts_normalized_display_brightness_to_android_integer() {
+        assert_eq!(parse_screen_brightness_float("0.3137255"), Some(80));
+        assert_eq!(parse_screen_brightness_float("Brightness: 1.0"), Some(255));
+        assert_eq!(parse_screen_brightness_float("Brightness: 1.5"), None);
+    }
+
+    #[test]
+    fn android13_reboot_counts_match_each_restore_boundary() {
+        assert_eq!(reboot_count_for_step(AndroidMajor::Android13, "사전 준비 재부팅"), 2);
+        assert_eq!(reboot_count_for_step(AndroidMajor::Android13, "Google 서비스 복구 루틴 1 완료 후 재부팅"), 3);
+        assert_eq!(reboot_count_for_step(AndroidMajor::Android13, "Google 서비스 복구 루틴 2 완료 후 재부팅"), 3);
+        assert_eq!(reboot_count_for_step(AndroidMajor::Android13, "Google 서비스 복구 루틴 3 완료 후 재부팅"), 2);
+        assert_eq!(reboot_count_for_step(AndroidMajor::Android13, "Google 서비스 복구 루틴 4 완료 후 재부팅"), 1);
+        assert_eq!(reboot_count_for_step(AndroidMajor::Android14, "Google 서비스 복구 루틴 1 완료 후 재부팅"), 1);
+    }
 }

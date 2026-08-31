@@ -66,6 +66,7 @@ const SIDEBAR_ANIM_THRESHOLD: f32 = 0.004;
 
 const DEVELOPER_YOUTUBE_URL: &str = "https://www.youtube.com/@dwas_KR?sub_confirmation=1";
 const GBST_RELEASES_URL: &str = "https://github.com/dwas-KR/GBST/releases";
+const GBST_APK_RELEASE_URL: &str = "https://github.com/dwas-KR/GBST-APK/releases/tag/apk-2026.08.29";
 const GBST_RELEASES_API_URL: &str = "https://api.github.com/repos/dwas-KR/GBST/releases?per_page=20";
 const DONATE_URL: &str = "https://www.youtube.com/@dwas_KR/join";
 const FEEDBACK_KOREAN_URL: &str = "https://github.com/dwas-KR/GBST/issues/1";
@@ -442,8 +443,8 @@ impl App {
                 Task::none()
             }
             Message::OpenApkLinks => {
-                if let Err(err) = open::that(REMOTE_APK_CATALOG_URL) {
-                    self.push_log(format!("[APK] GitHub Base64 링크 열기 실패: {err}"));
+                if let Err(err) = open::that(GBST_APK_RELEASE_URL) {
+                    self.push_log(format!("[APK] GitHub APK 링크 파일 열기 실패: {err}"));
                 }
                 Task::none()
             }
@@ -452,7 +453,7 @@ impl App {
                     .dashboard_info
                     .android_major
                     .map(|android| paths::apk_download_dir(android.value()))
-                    .unwrap_or_else(|| paths::runtime_root().join("APK"));
+                    .unwrap_or_else(paths::apk_cache_dir);
                 if let Err(err) = fs::create_dir_all(&dir) {
                     self.push_log(format!("[APK] APK 폴더 생성 실패: {err}"));
                 } else if let Err(err) = open::that(&dir) {
@@ -1554,7 +1555,7 @@ where
     ));
 
     let android_major = device.android_major.value();
-    let catalog = ApkCatalog::load_from_github_base64(REMOTE_APK_CATALOG_URL, |line| on_log(line))?;
+    let catalog = ApkCatalog::load_from_github_text(REMOTE_APK_CATALOG_URL, |line| on_log(line))?;
     let entries = catalog.entries_for_android(android_major)?;
     let _ = download_apks_for_android(android_major, &entries, |line| on_log(line))?;
 
@@ -1607,10 +1608,21 @@ where
         }
     };
 
+    let original_screen_brightness = match adb.read_screen_brightness() {
+        Ok(value) => {
+            on_log(format!("[Device] 사용자가 설정한 화면 밝기 값: {value}"));
+            Some(value)
+        }
+        Err(err) => {
+            on_log(format!("[Device] 사용자가 설정한 화면 밝기 값: 알 수 없음 ({err})"));
+            None
+        }
+    };
+
     let operation_result = (|| -> Result<(), anyhow::Error> {
         let android_major = device.android_major.value();
 
-        let catalog = ApkCatalog::load_from_github_base64(REMOTE_APK_CATALOG_URL, |line| on_log(line))?;
+        let catalog = ApkCatalog::load_from_github_text(REMOTE_APK_CATALOG_URL, |line| on_log(line))?;
         let entries = catalog.entries_for_android(android_major)?;
         let local_apks = download_apks_for_android(android_major, &entries, |line| on_log(line))?;
         match adb.assess_google_services_from_downloaded_apks(&local_apks) {
@@ -1628,6 +1640,19 @@ where
         adb.execute_plan(&plan, |line| on_log(line))?;
         Ok(())
     })();
+
+    if let Err(err) = adb.cleanup_gbst_temp_files() {
+        on_log(format!("    [경고] 기기 임시 파일 정리 실패, 계속 진행: {err}"));
+    } else {
+        on_log("[ADB] 기기 임시 폴더 /data/local/tmp/gbst 정리 완료".to_string());
+    }
+
+    if let Some(brightness) = original_screen_brightness {
+        on_log(format!("[Device] 사용자가 설정한 화면 밝기 값({brightness})으로 복원합니다."));
+        if let Err(err) = adb.restore_screen_brightness(brightness) {
+            on_log(format!("    [경고] 화면 밝기 값 복원 실패, 계속 진행: {err}"));
+        }
+    }
 
     if let Some(timeout) = original_screen_timeout.as_deref() {
         on_log("[Device] 사용자가 설정한 값으로 복원합니다.".to_string());
@@ -1681,7 +1706,7 @@ fn remove_downloaded_apk_folders<F>(mut on_log: F) -> Result<(), anyhow::Error>
 where
     F: FnMut(String),
 {
-    let apk_root = paths::runtime_root().join("APK");
+    let apk_root = paths::apk_cache_dir();
 
     on_log("__SPINNER__|apk_cleanup|[APK] 다운로드한 파일 및 폴더 제거... │".to_string());
 
@@ -1725,7 +1750,7 @@ fn clean_user_error(error: &str) -> String {
         || error.contains("https://")
         || error.contains("http://")
     {
-        return "APK 다운로드에 실패했습니다. GitHub Base64 링크 파일 또는 해독된 APK 다운로드 링크를 다시 확인해주세요.".to_string();
+        return "APK 다운로드에 실패했습니다. GitHub APK 링크 파일 또는 GitHub Release APK 다운로드 링크를 다시 확인해주세요.".to_string();
     }
 
     if error.contains("Lenovo") || error.contains("레노버") {
@@ -2003,7 +2028,6 @@ fn is_dashboard_alert_text(value: &str) -> bool {
         || trimmed == "복구 필요"
         || trimmed == "업데이트 필요"
         || trimmed == "Lenovo 기기가 아닙니다."
-        || trimmed == "ROW(글로벌롬)"
 }
 
 

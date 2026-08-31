@@ -1,10 +1,11 @@
 use crate::error::{GbstError, Result};
 use crate::model::ApkEntry;
-use base64::{engine::general_purpose, Engine as _};
 use std::collections::BTreeMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const REMOTE_APK_CATALOG_URL: &str =
     "https://raw.githubusercontent.com/dwas-KR/GBST/refs/heads/Download/GBST_apk.txt";
+pub const BUNDLED_APK_CATALOG_TEXT: &str = include_str!("../../../GBST_apk.txt");
 
 #[derive(Debug, Clone, Default)]
 pub struct ApkCatalog {
@@ -12,7 +13,7 @@ pub struct ApkCatalog {
 }
 
 impl ApkCatalog {
-    pub fn load_from_github_base64<F>(url: &str, mut on_log: F) -> Result<Self>
+    pub fn load_from_github_text<F>(url: &str, mut on_log: F) -> Result<Self>
     where
         F: FnMut(String),
     {
@@ -28,14 +29,30 @@ impl ApkCatalog {
 
         on_log("__SPINNER__|apk_catalog|[APK] GitHub 텍스트 읽는 중... │".to_string());
 
-        let encoded = ureq::get(url)
+        let request_url = cache_busted_catalog_url(url);
+        let text = ureq::get(&request_url)
+            .set("User-Agent", concat!("GBST/", env!("CARGO_PKG_VERSION")))
+            .set("Accept", "text/plain, text/*;q=0.9, */*;q=0.1")
+            .set("Cache-Control", "no-cache")
+            .set("Pragma", "no-cache")
             .call()
-            .map_err(|err| GbstError::Download(format!("GitHub Base64 링크 파일 다운로드 실패: {err}")))?
+            .map_err(|err| GbstError::Download(format!("GitHub APK 링크 파일 다운로드 실패: {err}")))?
             .into_string()
-            .map_err(|err| GbstError::Download(format!("GitHub Base64 링크 파일 읽기 실패: {err}")))?;
+            .map_err(|err| GbstError::Download(format!("GitHub APK 링크 파일 읽기 실패: {err}")))?;
 
-        let decoded = decode_base64_document(&encoded)?;
-        let catalog = Self::parse(&decoded)?;
+        let catalog = match Self::parse(&text) {
+            Ok(catalog) => catalog,
+            Err(remote_error) => {
+                on_log(format!(
+                    "[APK] GitHub APK 링크 파일이 평문 카탈로그 형식이 아니어서 프로그램에 포함된 공개 GBST_apk.txt를 사용합니다: {remote_error}"
+                ));
+                Self::parse(BUNDLED_APK_CATALOG_TEXT).map_err(|bundled_error| {
+                    GbstError::Catalog(format!(
+                        "GitHub APK 링크 파일과 프로그램 내장 카탈로그를 모두 읽지 못했습니다: remote={remote_error} / bundled={bundled_error}"
+                    ))
+                })?
+            }
+        };
 
         on_log("__SPINNER__|apk_catalog|[APK] GitHub 텍스트를 확인했습니다.".to_string());
         Ok(catalog)
@@ -131,53 +148,13 @@ impl ApkCatalog {
     }
 }
 
-fn decode_base64_document(encoded_text: &str) -> Result<String> {
-    let mut compact = encoded_text
-        .trim()
-        .trim_start_matches('\u{feff}')
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>()
-        .join("");
-
-    if let Some((_, right)) = compact.split_once("base64,") {
-        compact = right.trim().to_string();
-    }
-
-    compact.retain(|ch| !ch.is_whitespace());
-
-    if compact.is_empty() {
-        return Err(GbstError::Catalog(
-            "GitHub Base64 APK 링크 파일이 비어 있습니다.".to_string(),
-        ));
-    }
-
-    let mut padded = compact.clone();
-    match padded.len() % 4 {
-        0 => {}
-        2 => padded.push_str("=="),
-        3 => padded.push('='),
-        _ => {
-            return Err(GbstError::Catalog(
-                "Base64 길이가 올바르지 않습니다. Encoder 결과 전체를 업로드했는지 확인해주세요."
-                    .to_string(),
-            ))
-        }
-    }
-
-    let bytes = general_purpose::STANDARD
-        .decode(padded.as_bytes())
-        .or_else(|_| general_purpose::URL_SAFE.decode(padded.as_bytes()))
-        .or_else(|_| general_purpose::STANDARD_NO_PAD.decode(compact.as_bytes()))
-        .or_else(|_| general_purpose::URL_SAFE_NO_PAD.decode(compact.as_bytes()))
-        .map_err(|err| GbstError::Catalog(format!("Base64 해독 실패: {err}")))?;
-
-    String::from_utf8(bytes).map_err(|err| {
-        GbstError::Catalog(format!(
-            "Base64 해독 결과가 UTF-8 텍스트가 아닙니다: {err}"
-        ))
-    })
+fn cache_busted_catalog_url(url: &str) -> String {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let separator = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{separator}gbst_cache={nonce}")
 }
 
 fn parse_android_header(line: &str) -> Option<u32> {
@@ -225,11 +202,6 @@ com.google.android.gms: https://example.com/gms.apk
     }
 
     #[test]
-    fn decodes_standard_base64_without_padding() {
-        let decoded = decode_base64_document("7JWI64WV7ZWY7IS47JqU").unwrap();
-        assert_eq!(decoded, "안녕하세요");
-    }
-    #[test]
     fn accepts_signature_variant_keys_and_skips_placeholders() {
         let parsed = ApkCatalog::parse(
             r#"
@@ -245,6 +217,22 @@ com.google.android.onetimeinitializer: O
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].package, "com.google.android.configupdater_1");
         assert_eq!(entries[1].package, "com.google.android.configupdater_2");
+    }
+
+    #[test]
+    fn bundled_catalog_uses_plain_github_release_links() {
+        assert!(BUNDLED_APK_CATALOG_TEXT.trim_start().starts_with("# Android 13"));
+        let parsed = ApkCatalog::parse(BUNDLED_APK_CATALOG_TEXT).unwrap();
+        for android in 13..=17 {
+            let entries = parsed.entries_for_android(android).unwrap();
+            assert!(!entries.is_empty());
+            assert!(entries.iter().all(|entry| {
+                entry.url.starts_with(
+                    "https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/",
+                )
+            }));
+        }
+        assert!(parsed.entries_for_android(18).is_err());
     }
 
 }

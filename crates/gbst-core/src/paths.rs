@@ -32,7 +32,7 @@ pub fn config_root() -> PathBuf {
 }
 
 pub fn apk_cache_dir() -> PathBuf {
-    config_root().join("apk_cache")
+    config_root().join("apk")
 }
 
 pub fn language_config_path() -> PathBuf {
@@ -68,9 +68,7 @@ pub fn adb_key_path() -> PathBuf {
 }
 
 pub fn apk_download_dir(android_major: u32) -> PathBuf {
-    runtime_root()
-        .join("APK")
-        .join(format!("Android {android_major}"))
+    apk_cache_dir().join(format!("Android {android_major}"))
 }
 
 pub fn logs_dir() -> PathBuf {
@@ -150,7 +148,19 @@ pub fn ensure_runtime_directories() -> std::io::Result<()> {
     migrate_legacy_paths()?;
     fs::create_dir_all(apk_cache_dir())?;
     fs::create_dir_all(stable_adb_key_dir())?;
-    fs::create_dir_all(runtime_root().join("APK"))?;
     fs::create_dir_all(logs_dir())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apk_download_dir_uses_local_appdata_cache_root() {
+        assert_eq!(
+            apk_download_dir(13),
+            config_root().join("apk").join("Android 13")
+        );
+    }
 }

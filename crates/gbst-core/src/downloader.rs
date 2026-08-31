@@ -16,6 +16,7 @@ use std::time::Duration;
 struct DownloadTask {
     entry: ApkEntry,
     local_path: PathBuf,
+    expected_size: u64,
 }
 
 pub fn download_apks_for_android<F>(
@@ -30,17 +31,32 @@ where
     std::fs::create_dir_all(&dir)?;
 
     let total = entries.len().max(1);
-    let tasks = entries
+    let mut tasks = entries
         .iter()
         .cloned()
         .map(|entry| {
             let file_name = download_file_name(&entry);
+            let local_path = dir.join(file_name);
+            let cached_size = local_path
+                .metadata()
+                .ok()
+                .filter(|metadata| metadata.is_file())
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            let expected_size = if cached_size > 0 {
+                cached_size
+            } else {
+                remote_content_length(&entry.url)
+            };
+
             DownloadTask {
                 entry,
-                local_path: dir.join(file_name),
+                local_path,
+                expected_size,
             }
         })
         .collect::<Vec<_>>();
+    sort_download_tasks_largest_first(&mut tasks);
 
     on_log(format!(
         "__SPINNER__|apk_download|[APK] {} Android {} Google Service APK 파일 다운로드 시작",
@@ -48,7 +64,7 @@ where
         android_major,
     ));
 
-    let worker_count = tasks.len().min(2).max(1);
+    let worker_count = tasks.len().min(4).max(1);
     let shared_tasks = Arc::new(tasks);
     let next_index = Arc::new(AtomicUsize::new(0));
     let (tx, rx) = mpsc::channel();
@@ -369,6 +385,52 @@ fn canonical_catalog_package(package: &str) -> &str {
     }
 }
 
+fn sort_download_tasks_largest_first(tasks: &mut [DownloadTask]) {
+    tasks.sort_by(|left, right| {
+        right
+            .expected_size
+            .cmp(&left.expected_size)
+            .then_with(|| left.entry.line_no.cmp(&right.entry.line_no))
+    });
+}
+
+fn download_http_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(15))
+        .timeout_read(Duration::from_secs(90))
+        .timeout_write(Duration::from_secs(30))
+        .build()
+}
+
+fn remote_content_length(url: &str) -> u64 {
+    let agent = download_http_agent();
+    for candidate in download_url_candidates(url) {
+        let response = agent.head(&candidate)
+            .set("User-Agent", concat!("GBST/", env!("CARGO_PKG_VERSION")))
+            .set("Accept-Encoding", "identity")
+            .call();
+
+        if let Ok(response) = response {
+            if let Some(size) = response
+                .header("Content-Length")
+                .and_then(|value| value.trim().parse::<u64>().ok())
+                .filter(|value| *value > 0)
+            {
+                return size;
+            }
+        }
+    }
+
+    0
+}
+
+fn file_has_zip_magic(path: &Path) -> Result<bool> {
+    let mut file = std::fs::File::open(path)?;
+    let mut signature = [0_u8; 4];
+    let read = file.read(&mut signature)?;
+    Ok(read == signature.len() && matches!(signature, [b'P', b'K', 3, 4] | [b'P', b'K', 5, 6] | [b'P', b'K', 7, 8]))
+}
+
 fn download_to_file(url: &str, path: &Path) -> Result<()> {
     paths::ensure_parent(path)?;
 
@@ -377,14 +439,22 @@ fn download_to_file(url: &str, path: &Path) -> Result<()> {
     let temp_path = PathBuf::from(temp_name);
     let _ = std::fs::remove_file(&temp_path);
 
-    let response = ureq::get(url)
+    let agent = download_http_agent();
+    let response = agent
+        .get(url)
         .set("User-Agent", concat!("GBST/", env!("CARGO_PKG_VERSION")))
         .set(
             "Accept",
             "application/vnd.android.package-archive, application/octet-stream, */*",
         )
+        .set("Accept-Encoding", "identity")
         .call()
         .map_err(|err| GbstError::Download(format!("다운로드 실패: {err}")))?;
+
+    let expected_content_length = response
+        .header("Content-Length")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0);
 
     let content_type = response
         .header("Content-Type")
@@ -402,8 +472,8 @@ fn download_to_file(url: &str, path: &Path) -> Result<()> {
         .truncate(true)
         .write(true)
         .open(&temp_path)?;
-    let mut writer = BufWriter::with_capacity(1024 * 1024, file);
-    let mut buffer = vec![0_u8; 1024 * 1024];
+    let mut writer = BufWriter::with_capacity(4 * 1024 * 1024, file);
+    let mut buffer = vec![0_u8; 4 * 1024 * 1024];
 
     let copy_result = (|| -> Result<u64> {
         let mut written = 0u64;
@@ -435,6 +505,22 @@ fn download_to_file(url: &str, path: &Path) -> Result<()> {
         let _ = std::fs::remove_file(&temp_path);
         return Err(GbstError::Download(
             "다운로드한 APK 파일의 크기가 0바이트입니다.".to_string(),
+        ));
+    }
+
+    if let Some(expected) = expected_content_length {
+        if written != expected {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(GbstError::Download(format!(
+                "APK 다운로드 크기가 응답과 일치하지 않습니다: 예상={expected}바이트, 실제={written}바이트"
+            )));
+        }
+    }
+
+    if !file_has_zip_magic(&temp_path)? {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(GbstError::Download(
+            "다운로드한 파일이 APK/ZIP 형식이 아닙니다.".to_string(),
         ));
     }
 
@@ -580,4 +666,36 @@ fn apk_download_progress_bar(current: usize, total: usize) -> String {
         "·".repeat(empty),
         percent.min(100)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sorts_download_tasks_largest_first() {
+        let mut tasks = vec![
+            DownloadTask {
+                entry: ApkEntry { android_major: 16, package: "small".into(), url: "https://example.com/small.apk".into(), line_no: 1 },
+                local_path: PathBuf::from("small.apk"),
+                expected_size: 10,
+            },
+            DownloadTask {
+                entry: ApkEntry { android_major: 16, package: "large".into(), url: "https://example.com/large.apk".into(), line_no: 2 },
+                local_path: PathBuf::from("large.apk"),
+                expected_size: 300,
+            },
+            DownloadTask {
+                entry: ApkEntry { android_major: 16, package: "medium".into(), url: "https://example.com/medium.apk".into(), line_no: 3 },
+                local_path: PathBuf::from("medium.apk"),
+                expected_size: 100,
+            },
+        ];
+
+        sort_download_tasks_largest_first(&mut tasks);
+
+        assert_eq!(tasks[0].entry.package, "large");
+        assert_eq!(tasks[1].entry.package, "medium");
+        assert_eq!(tasks[2].entry.package, "small");
+    }
 }

@@ -569,7 +569,17 @@ fn translate_dynamic_runtime_text(language: LanguageOption, text: &str) -> Optio
         return Some(format_device_info_log(language, rest));
     }
     if let Some(rest) = text.strip_prefix("[Device] 사용자가 설정한 화면 꺼짐 값: ") {
-        return Some(format!("{}{}", phrase(language, "screen_timeout_value")?, rest.trim()));
+        let value = rest.trim();
+        let translated_value = if value == "사용 안 함" {
+            phrase(language, "screen_timeout_never")?
+        } else {
+            value
+        };
+        return Some(format!(
+            "{}{}",
+            phrase(language, "screen_timeout_value")?,
+            translated_value
+        ));
     }
     if text == "[Device] 사용자가 설정한 값으로 복원합니다." {
         return Some(phrase(language, "restore_screen_timeout")?.to_string());
@@ -949,6 +959,7 @@ fn phrase(language: LanguageOption, key: &str) -> Option<&'static str> {
         "device_model_label" => lang_text(language, "Model: ", "Модель: ", "モデル名: ", "型號: ", "Mẫu: ", "Μοντέλο: ", "मॉडल: ", "მოდელი: ", "Model: ", "الطراز: ", "Modelo: "),
         "device_android_label" => lang_text(language, "Android version: ", "Версия Android: ", "Androidバージョン: ", "Android 版本: ", "Phiên bản Android: ", "Έκδοση Android: ", "Android संस्करण: ", "Android ვერსია: ", "Android-versie: ", "إصدار Android: ", "Versión de Android: "),
         "screen_timeout_value" => lang_text(language, "[Device] User's screen timeout value: ", "[Device] Значение тайм-аута экрана пользователя: ", "[Device] ユーザー設定の画面消灯時間: ", "[Device] 使用者設定的螢幕逾時值: ", "[Device] Giá trị thời gian tắt màn hình của người dùng: ", "[Device] Τιμή χρονικού ορίου οθόνης του χρήστη: ", "[Device] उपयोगकर्ता का स्क्रीन टाइमआउट मान: ", "[Device] მომხმარებლის ეკრანის გამორთვის მნიშვნელობა: ", "[Device] Schermtime-outwaarde van gebruiker: ", "[Device] قيمة مهلة إيقاف الشاشة للمستخدم: ", "[Device] Valor de tiempo de espera de pantalla del usuario: "),
+        "screen_timeout_never" => lang_text(language, "Never", "Никогда", "なし", "永不", "Không bao giờ", "Ποτέ", "कभी नहीं", "არასოდეს", "Nooit", "أبدًا", "Nunca"),
         "restore_screen_timeout" => lang_text(language, "[Device] Restoring the user's original setting.", "[Device] Восстановление исходной настройки пользователя.", "[Device] ユーザーの元の設定に復元します。", "[Device] 正在還原使用者原本的設定。", "[Device] Đang khôi phục cài đặt ban đầu của người dùng.", "[Device] Επαναφορά της αρχικής ρύθμισης του χρήστη.", "[Device] उपयोगकर्ता की मूल सेटिंग बहाल की जा रही है।", "[Device] მომხმარებლის საწყისი პარამეტრი აღდგება.", "[Device] Oorspronkelijke gebruikersinstelling herstellen.", "[Device] جارٍ استعادة إعداد المستخدم الأصلي.", "[Device] Restaurando la configuración original del usuario."),
         "github_reading" => lang_text(language, "[APK] Reading GitHub text...", "[APK] Чтение текста GitHub...", "[APK] GitHubテキストを読み込み中...", "[APK] 正在讀取 GitHub 文字...", "[APK] Đang đọc văn bản GitHub...", "[APK] Ανάγνωση κειμένου GitHub...", "[APK] GitHub टेक्स्ट पढ़ा जा रहा है...", "[APK] GitHub ტექსტი იკითხება...", "[APK] GitHub-tekst lezen...", "[APK] جارٍ قراءة نص GitHub...", "[APK] Leyendo texto de GitHub..."),
         "github_done" => lang_text(language, "[APK] GitHub text has been verified.", "[APK] Текст GitHub проверен.", "[APK] GitHubテキストを確認しました。", "[APK] 已確認 GitHub 文字。", "[APK] Đã xác nhận văn bản GitHub.", "[APK] Το κείμενο GitHub επιβεβαιώθηκε.", "[APK] GitHub टेक्स्ट की पुष्टि हो गई।", "[APK] GitHub ტექსტი დადასტურდა.", "[APK] GitHub-tekst is gecontroleerd.", "[APK] تم التحقق من نص GitHub.", "[APK] Texto de GitHub verificado."),

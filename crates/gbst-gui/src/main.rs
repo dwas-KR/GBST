@@ -43,6 +43,7 @@ const MODEL_TB320FC_IMAGE_BYTES: &[u8] = include_bytes!("../assets/models/TB320F
 const MODEL_TB321FC_IMAGE_BYTES: &[u8] = include_bytes!("../assets/models/TB321FC.png");
 const MODEL_TB322FC_IMAGE_BYTES: &[u8] = include_bytes!("../assets/models/TB322FC.png");
 const MODEL_TB323FC_IMAGE_BYTES: &[u8] = include_bytes!("../assets/models/TB323FC.png");
+const MODEL_TB324ZC_IMAGE_BYTES: &[u8] = include_bytes!("../assets/models/TB324ZC.png");
 const MODEL_TB331FC_IMAGE_BYTES: &[u8] = include_bytes!("../assets/models/TB331FC.png");
 const MODEL_TB335FC_IMAGE_BYTES: &[u8] = include_bytes!("../assets/models/TB335FC.png");
 const MODEL_TB365FC_IMAGE_BYTES: &[u8] = include_bytes!("../assets/models/TB365FC.png");
@@ -148,6 +149,7 @@ enum DashboardModelImage {
     Tb321Fc,
     Tb322Fc,
     Tb323Fc,
+    Tb324Zc,
     Tb331Fc,
     Tb335Fc,
     Tb365Fc,
@@ -263,6 +265,7 @@ struct App {
     model_tb321fc_handle: iced::widget::image::Handle,
     model_tb322fc_handle: iced::widget::image::Handle,
     model_tb323fc_handle: iced::widget::image::Handle,
+    model_tb324zc_handle: iced::widget::image::Handle,
     model_tb331fc_handle: iced::widget::image::Handle,
     model_tb335fc_handle: iced::widget::image::Handle,
     model_tb365fc_handle: iced::widget::image::Handle,
@@ -313,6 +316,7 @@ impl App {
             model_tb321fc_handle: smooth_png_handle(MODEL_TB321FC_IMAGE_BYTES, 180, 108),
             model_tb322fc_handle: smooth_png_handle(MODEL_TB322FC_IMAGE_BYTES, 180, 108),
             model_tb323fc_handle: smooth_png_handle(MODEL_TB323FC_IMAGE_BYTES, 180, 108),
+            model_tb324zc_handle: smooth_png_handle(MODEL_TB324ZC_IMAGE_BYTES, 180, 108),
             model_tb331fc_handle: smooth_png_handle(MODEL_TB331FC_IMAGE_BYTES, 180, 108),
             model_tb335fc_handle: smooth_png_handle(MODEL_TB335FC_IMAGE_BYTES, 180, 108),
             model_tb365fc_handle: smooth_png_handle(MODEL_TB365FC_IMAGE_BYTES, 180, 108),
@@ -1598,7 +1602,7 @@ where
             let trimmed = value.trim().to_string();
             on_log(format!(
                 "[Device] 사용자가 설정한 화면 꺼짐 값: {}",
-                if trimmed.is_empty() { "알 수 없음" } else { trimmed.as_str() }
+                DirectAdb::screen_off_timeout_display_value(&trimmed)
             ));
             if trimmed.is_empty() { None } else { Some(trimmed) }
         }
@@ -1682,7 +1686,6 @@ where
             }
         }
 
-        thread::sleep(Duration::from_secs(1));
     }
 
     let info = refreshed_info.ok_or_else(|| {
@@ -1919,6 +1922,7 @@ impl App {
             DashboardModelImage::Tb321Fc => self.model_tb321fc_handle.clone(),
             DashboardModelImage::Tb322Fc => self.model_tb322fc_handle.clone(),
             DashboardModelImage::Tb323Fc => self.model_tb323fc_handle.clone(),
+            DashboardModelImage::Tb324Zc => self.model_tb324zc_handle.clone(),
             DashboardModelImage::Tb331Fc => self.model_tb331fc_handle.clone(),
             DashboardModelImage::Tb335Fc => self.model_tb335fc_handle.clone(),
             DashboardModelImage::Tb365Fc => self.model_tb365fc_handle.clone(),
@@ -1944,13 +1948,13 @@ fn dashboard_model_image_from_info(info: &DashboardInfo) -> DashboardModelImage 
         DashboardModelImage::Tb9707F
     } else if contains_any_model_alias(&model, &["TB710FU", "TB710FC"]) {
         DashboardModelImage::Tb710Fu
-    } else if contains_any_model_alias(&model, &["TB522FU", "TB522FC"]) {
+    } else if contains_any_model_alias(&model, &["TB711FU", "TB711FC", "TB522FU", "TB522FC"]) {
         DashboardModelImage::Tb522Fu
     } else if contains_any_model_alias(&model, &["TB520FU", "TB520FC"]) {
         DashboardModelImage::Tb520Fu
     } else if contains_any_model_alias(&model, &["TB378FC", "TB378FU"]) {
         DashboardModelImage::Tb378Fc
-    } else if contains_any_model_alias(&model, &["TB376FC", "TB376FU"]) {
+    } else if contains_any_model_alias(&model, &["TB390FU", "TB390FC", "TB376FC", "TB376FU"]) {
         DashboardModelImage::Tb376Fc
     } else if contains_any_model_alias(&model, &["TB375FC", "TB375FU", "TB373FU", "TB373FC"]) {
         DashboardModelImage::Tb375Fc
@@ -1962,6 +1966,8 @@ fn dashboard_model_image_from_info(info: &DashboardInfo) -> DashboardModelImage 
         DashboardModelImage::Tb335Fc
     } else if contains_any_model_alias(&model, &["TB331FC", "TB331FU"]) {
         DashboardModelImage::Tb331Fc
+    } else if contains_any_model_alias(&model, &["TB324ZC"]) {
+        DashboardModelImage::Tb324Zc
     } else if contains_any_model_alias(&model, &["TB323FC", "TB323FU"]) {
         DashboardModelImage::Tb323Fc
     } else if contains_any_model_alias(&model, &["TB322FC", "TB322FU"]) {
@@ -2579,5 +2585,28 @@ fn split_semver_suffix(value: &str) -> (&str, &str) {
         }
         (Some(index), None) | (None, Some(index)) => (&value[..index], &value[index..]),
         (None, None) => (value, ""),
+    }
+}
+
+
+#[cfg(test)]
+mod model_image_regression_tests {
+    use super::*;
+
+    fn info(model: &str) -> DashboardInfo {
+        let mut info = DashboardInfo::unknown();
+        info.is_lenovo = true;
+        info.model_name = model.to_string();
+        info
+    }
+
+    #[test]
+    fn requested_skus_share_only_their_visual_assets() {
+        assert_eq!(dashboard_model_image_from_info(&info("TB336FU")), DashboardModelImage::Tb335Fc);
+        assert_eq!(dashboard_model_image_from_info(&info("TB361FU")), DashboardModelImage::Tb365Fc);
+        assert_eq!(dashboard_model_image_from_info(&info("TB373FU")), DashboardModelImage::Tb375Fc);
+        assert_eq!(dashboard_model_image_from_info(&info("TB390FU")), DashboardModelImage::Tb376Fc);
+        assert_eq!(dashboard_model_image_from_info(&info("TB711FU")), DashboardModelImage::Tb522Fu);
+        assert_eq!(dashboard_model_image_from_info(&info("TB324ZC")), DashboardModelImage::Tb324Zc);
     }
 }

@@ -18,13 +18,12 @@ Reference project: https://github.com/dwas-KR/LPMBox/tree/main
 
 ## APK Source and File Integrity
 
-The APK files used by GBST are obtained through the following process.
-
-Link: https://github.com/dwas-KR/GBST-APK/releases
+The APK files used by GBST are obtained through the following process:
 
 1. The original APK files are downloaded from **APKMirror**.
-2. The downloaded files are stored on the developer's personal drive for reliable distribution.
-3. GBST downloads the required APK files from that drive during the installation, repair, or update workflow.
+2. The unmodified APK files are published as assets in the public **GBST-APK GitHub Release**.
+3. GBST reads a plain-text `GBST_apk.txt` catalog and downloads the matching GitHub Release assets for the connected Android version. No Base64 decoding is used for the APK catalog. The same public catalog is also bundled with the source as a fallback.
+4. Downloaded APK files are cached under `%LOCALAPPDATA%\dwas_kr\GBST\apk\Android <version>` and reused after package validation.
 
 The APK files provided through GBST are stored and distributed **without modification, patching, malware injection, or other alterations**.
 

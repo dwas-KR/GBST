@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 use crate::error::{GbstError, Result};
 use crate::model::ApkEntry;
 use std::collections::BTreeMap;
@@ -30,17 +31,36 @@ impl ApkCatalog {
         on_log("__SPINNER__|apk_catalog|[APK] GitHub 텍스트 읽는 중... │".to_string());
 
         let request_url = cache_busted_catalog_url(url);
-        let text = ureq::get(&request_url)
-            .set("User-Agent", concat!("GBST/", env!("CARGO_PKG_VERSION")))
-            .set("Accept", "text/plain, text/*;q=0.9, */*;q=0.1")
-            .set("Cache-Control", "no-cache")
-            .set("Pragma", "no-cache")
-            .call()
-            .map_err(|err| GbstError::Download(format!("GitHub APK 링크 파일 다운로드 실패: {err}")))?
-            .into_string()
-            .map_err(|err| GbstError::Download(format!("GitHub APK 링크 파일 읽기 실패: {err}")))?;
+        let downloaded = (|| -> Result<String> {
+            ureq::get(&request_url)
+                .header("User-Agent", concat!("GBST/", env!("CARGO_PKG_VERSION")))
+                .header("Accept", "text/plain, text/*;q=0.9, */*;q=0.1")
+                .header("Cache-Control", "no-cache")
+                .header("Pragma", "no-cache")
+                .call()
+                .map_err(|err| {
+                    GbstError::Download(format!("GitHub APK 링크 파일 다운로드 실패: {err}"))
+                })?
+                .into_body()
+                .read_to_string()
+                .map_err(|err| {
+                    GbstError::Download(format!("GitHub APK 링크 파일 읽기 실패: {err}"))
+                })
+        })();
+        let text = match downloaded {
+            Ok(text) => text,
+            Err(err) => {
+                on_log(format!(
+                    "[APK] 원격 목록을 읽을 수 없어 내장 카탈로그를 사용합니다: {err}"
+                ));
+                BUNDLED_APK_CATALOG_TEXT.to_owned()
+            }
+        };
 
-        let catalog = match Self::parse(&text) {
+        let catalog = match Self::parse(&text).and_then(|catalog| {
+            catalog.verify_release_origin()?;
+            Ok(catalog)
+        }) {
             Ok(catalog) => catalog,
             Err(remote_error) => {
                 on_log(format!(
@@ -112,9 +132,9 @@ impl ApkCatalog {
                 )));
             }
 
-            if !(url.starts_with("http://") || url.starts_with("https://")) {
+            if !url.starts_with("https://") {
                 return Err(GbstError::Catalog(format!(
-                    "{line_no}번째 줄의 링크는 http/https로 시작해야 합니다: {url}"
+                    "{line_no}번째 줄의 링크는 HTTPS여야 합니다: {url}"
                 )));
             }
 
@@ -127,6 +147,23 @@ impl ApkCatalog {
         }
 
         Ok(Self { by_android })
+    }
+
+    /// Trust only the maintained GBST-APK release origin for remote catalog entries.
+    /// Note: this is a source restriction, not a Google certificate signature check.
+    fn verify_release_origin(&self) -> Result<()> {
+        const TRUSTED: &str = "https://github.com/dwas-KR/GBST-APK/releases/download/";
+        for entries in self.by_android.values() {
+            for entry in entries {
+                if !entry.url.starts_with(TRUSTED) {
+                    return Err(GbstError::Catalog(format!(
+                        "{}번째 줄: 허용되지 않은 APK 배포 주소: {}",
+                        entry.line_no, entry.url
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn entries_for_android(&self, android_major: u32) -> Result<Vec<ApkEntry>> {
@@ -220,8 +257,23 @@ com.google.android.onetimeinitializer: O
     }
 
     #[test]
+    fn remote_catalog_rejects_unknown_asset_origins() {
+        let catalog = ApkCatalog::parse(
+            "# Android 16\ncom.android.vending: https://untrusted.example/store.apk\n",
+        )
+        .unwrap();
+        assert!(catalog.verify_release_origin().is_err());
+        let bundled = ApkCatalog::parse(BUNDLED_APK_CATALOG_TEXT).unwrap();
+        assert!(bundled.verify_release_origin().is_ok());
+    }
+
+    #[test]
     fn bundled_catalog_uses_plain_github_release_links() {
-        assert!(BUNDLED_APK_CATALOG_TEXT.trim_start().starts_with("# Android 13"));
+        assert!(
+            BUNDLED_APK_CATALOG_TEXT
+                .trim_start()
+                .starts_with("# Android 13")
+        );
         let parsed = ApkCatalog::parse(BUNDLED_APK_CATALOG_TEXT).unwrap();
         for android in 13..=17 {
             let entries = parsed.entries_for_android(android).unwrap();
@@ -234,5 +286,4 @@ com.google.android.onetimeinitializer: O
         }
         assert!(parsed.entries_for_android(18).is_err());
     }
-
 }

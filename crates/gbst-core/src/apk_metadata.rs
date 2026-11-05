@@ -1,6 +1,7 @@
+// SPDX-License-Identifier: GPL-3.0-only
 use crate::model::LocalApk;
-use std::collections::BTreeMap;
 use flate2::read::DeflateDecoder;
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::Path;
@@ -85,7 +86,6 @@ pub fn apk_version_codes_from_dir(dir: &Path) -> BTreeMap<String, u64> {
     versions
 }
 
-
 pub fn apk_version_code_candidates_from_local_apks(
     apks: &[LocalApk],
 ) -> BTreeMap<String, Vec<u64>> {
@@ -106,9 +106,7 @@ pub fn apk_version_code_candidates_from_local_apks(
     versions
 }
 
-pub fn apk_version_code_candidates_from_dir(
-    dir: &Path,
-) -> BTreeMap<String, Vec<u64>> {
+pub fn apk_version_code_candidates_from_dir(dir: &Path) -> BTreeMap<String, Vec<u64>> {
     let mut versions = BTreeMap::new();
     let Ok(entries) = fs::read_dir(dir) else {
         return versions;
@@ -215,7 +213,9 @@ fn extract_zip_local_entry(
     compressed_size: usize,
     method: u16,
 ) -> Option<Vec<u8>> {
-    if local_header_offset + 30 > bytes.len() || read_u32(bytes, local_header_offset)? != 0x0403_4B50 {
+    if local_header_offset + 30 > bytes.len()
+        || read_u32(bytes, local_header_offset)? != 0x0403_4B50
+    {
         return None;
     }
 
@@ -372,8 +372,8 @@ fn parse_start_element(
 
         match attr_name.as_str() {
             "package" => {
-                package = value_as_string(strings, raw_value_idx, data_type, data)
-                    .unwrap_or_default();
+                package =
+                    value_as_string(strings, raw_value_idx, data_type, data).unwrap_or_default();
             }
             "versionCode" => {
                 version_code = value_as_u64(strings, raw_value_idx, data_type, data);
@@ -398,7 +398,12 @@ fn parse_start_element(
     })
 }
 
-fn value_as_string(strings: &[String], raw_value_idx: u32, data_type: u8, data: u32) -> Option<String> {
+fn value_as_string(
+    strings: &[String],
+    raw_value_idx: u32,
+    data_type: u8,
+    data: u32,
+) -> Option<String> {
     if raw_value_idx != NO_INDEX {
         return string_at(strings, raw_value_idx);
     }
@@ -424,7 +429,10 @@ fn value_as_u64(strings: &[String], raw_value_idx: u32, data_type: u8, data: u32
 
 fn parse_u64_from_text(text: &str) -> Option<u64> {
     let trimmed = text.trim();
-    if let Some(hex) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+    if let Some(hex) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
         u64::from_str_radix(hex, 16).ok()
     } else {
         trimmed.parse::<u64>().ok()
@@ -479,7 +487,10 @@ fn read_length8(bytes: &[u8], pos: usize, end: usize) -> Option<(usize, usize)> 
         if pos + 1 >= end || pos + 1 >= bytes.len() {
             return None;
         }
-        Some(((((first & 0x7F) as usize) << 8) | bytes[pos + 1] as usize, 2))
+        Some((
+            (((first & 0x7F) as usize) << 8) | bytes[pos + 1] as usize,
+            2,
+        ))
     } else {
         Some((first as usize, 1))
     }

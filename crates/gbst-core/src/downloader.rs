@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 use crate::apk_metadata::read_apk_manifest_info;
 use crate::error::{GbstError, Result};
 use crate::model::{ApkEntry, LocalApk};
@@ -8,9 +9,11 @@ use std::fs::OpenOptions;
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
+
+const PINNED_APK_SHA256: &str = include_str!("../../../GBST_APK_SHA256SUMS.txt");
 
 #[derive(Clone)]
 struct DownloadTask {
@@ -58,9 +61,11 @@ where
         .collect::<Vec<_>>();
     sort_download_tasks_largest_first(&mut tasks);
 
+    // Typed progress is rendered by the LTBox-style Iced progress bar,
+    // not embedded as Unicode blocks in the human-readable APK log.
+    on_log("__GBST_DOWNLOAD_PROGRESS__|0".to_string());
     on_log(format!(
-        "__SPINNER__|apk_download|[APK] {} Android {} Google Service APK 파일 다운로드 시작",
-        apk_download_progress_bar(0, total),
+        "__SPINNER__|apk_download|[APK] Android {} Google Service APK 파일 다운로드 시작",
         android_major,
     ));
 
@@ -75,15 +80,17 @@ where
         let next_index = Arc::clone(&next_index);
         let tx = tx.clone();
 
-        handles.push(thread::spawn(move || loop {
-            let index = next_index.fetch_add(1, Ordering::Relaxed);
-            if index >= tasks.len() {
-                break;
-            }
+        handles.push(thread::spawn(move || {
+            loop {
+                let index = next_index.fetch_add(1, Ordering::Relaxed);
+                if index >= tasks.len() {
+                    break;
+                }
 
-            let result = prepare_local_apk(&tasks[index]);
-            if tx.send((index, result)).is_err() {
-                break;
+                let result = prepare_local_apk(&tasks[index]);
+                if tx.send((index, result)).is_err() {
+                    break;
+                }
             }
         }));
     }
@@ -104,8 +111,11 @@ where
 
                 if prepared_count < total {
                     on_log(format!(
-                        "__SPINNER__|apk_download|[APK] {} Android {} Google Service APK 파일을 다운로드 중...",
-                        apk_download_progress_bar(prepared_count, total),
+                        "__GBST_DOWNLOAD_PROGRESS__|{}",
+                        apk_download_percent(prepared_count, total),
+                    ));
+                    on_log(format!(
+                        "__SPINNER__|apk_download|[APK] Android {} Google Service APK 파일을 다운로드 중...",
                         android_major,
                     ));
                 }
@@ -148,8 +158,11 @@ where
 
                 if prepared_count < total {
                     on_log(format!(
-                        "__SPINNER__|apk_download|[APK] {} Android {} Google Service APK 파일을 다운로드 중...",
-                        apk_download_progress_bar(prepared_count, total),
+                        "__GBST_DOWNLOAD_PROGRESS__|{}",
+                        apk_download_percent(prepared_count, total),
+                    ));
+                    on_log(format!(
+                        "__SPINNER__|apk_download|[APK] Android {} Google Service APK 파일을 다운로드 중...",
                         android_major,
                     ));
                 }
@@ -211,9 +224,9 @@ where
         .collect::<HashSet<_>>();
     prune_download_dir(&dir, &expected_paths)?;
 
+    on_log("__GBST_DOWNLOAD_PROGRESS__|100".to_string());
     on_log(format!(
-        "__SPINNER__|apk_download|[APK] {} Android {} Google Service APK 파일 다운로드 완료",
-        apk_download_progress_bar(total, total),
+        "__SPINNER__|apk_download|[APK] Android {} Google Service APK 파일 다운로드 완료",
         android_major,
     ));
 
@@ -286,10 +299,16 @@ fn prepare_local_apk(task: &DownloadTask) -> Result<LocalApk> {
     migrate_legacy_cached_apk(task)?;
 
     if task.local_path.is_file() && task.local_path.metadata()?.len() > 0 {
-        if let Ok(apk) = validate_local_apk(&task.entry, &task.local_path) {
-            return Ok(apk);
+        if cached_file_matches_catalog(&task.entry, &task.local_path)
+            && verify_pinned_apk_integrity(&task.entry, &task.local_path).is_ok()
+        {
+            if let Ok(apk) = validate_local_apk(&task.entry, &task.local_path) {
+                return Ok(apk);
+            }
         }
+        // Missing/invalid metadata forces a one-time refresh of older caches.
         let _ = std::fs::remove_file(&task.local_path);
+        let _ = std::fs::remove_file(cache_record_path(&task.local_path));
     }
 
     let mut failures = Vec::new();
@@ -299,7 +318,18 @@ fn prepare_local_apk(task: &DownloadTask) -> Result<LocalApk> {
         for attempt in 0..3 {
             match download_to_file(&url, &task.local_path) {
                 Ok(()) => match validate_local_apk(&task.entry, &task.local_path) {
-                    Ok(apk) => return Ok(apk),
+                    Ok(apk) => match verify_pinned_apk_integrity(&task.entry, &task.local_path)
+                        .and_then(|_| write_cache_record(&task.entry, &task.local_path))
+                    {
+                        Ok(()) => return Ok(apk),
+                        Err(err) => {
+                            failures.push(format!(
+                                "{}: 캐시 기록 실패: {err}",
+                                compact_download_url(&url)
+                            ));
+                            let _ = std::fs::remove_file(&task.local_path);
+                        }
+                    },
                     Err(err) => {
                         failures.push(format!("{}: {err}", compact_download_url(&url)));
                         let _ = std::fs::remove_file(&task.local_path);
@@ -373,6 +403,103 @@ fn validate_local_apk(entry: &ApkEntry, local_path: &Path) -> Result<LocalApk> {
     })
 }
 
+/// Local cache integrity only; not a publisher or signature verification.
+fn cache_record_path(apk_path: &Path) -> PathBuf {
+    apk_path.with_extension("apk.gbst-cache.json")
+}
+
+fn hash_file_sha256(path: &Path) -> Result<String> {
+    let mut reader = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let len = reader.read(&mut buffer)?;
+        if len == 0 {
+            break;
+        }
+        hasher.update(&buffer[..len]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+/// Release-asset digest pinned at build time from the project transparency manifest.
+/// A new release asset requires a deliberate source update and a new build.
+fn expected_pinned_sha256(url: &str) -> Option<&'static str> {
+    let filename = url.split('?').next()?.rsplit('/').next()?;
+    PINNED_APK_SHA256.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        let digest = parts.next()?;
+        let recorded_filename = parts.next()?;
+        if recorded_filename.replace('~', "-") == filename {
+            Some(digest)
+        } else {
+            None
+        }
+    })
+}
+
+fn verify_pinned_apk_integrity(entry: &ApkEntry, path: &Path) -> Result<()> {
+    let expected = expected_pinned_sha256(&entry.url).ok_or_else(|| {
+        GbstError::Download(format!(
+            "신규 APK는 프로그램 내 신뢰 목록에 등록되어 있지 않습니다: {}",
+            entry.url
+        ))
+    })?;
+    let actual = hash_file_sha256(path)?;
+    if !actual.eq_ignore_ascii_case(expected) {
+        return Err(GbstError::Download(format!(
+            "APK SHA-256 불일치: {}. 공식 배포 목록의 원본과 다릅니다.",
+            entry.package
+        )));
+    }
+    Ok(())
+}
+
+fn cached_file_matches_catalog(entry: &ApkEntry, apk_path: &Path) -> bool {
+    let record = match std::fs::read(cache_record_path(apk_path))
+        .ok()
+        .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
+    {
+        Some(record) => record,
+        None => return false,
+    };
+    let Ok(metadata) = apk_path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.len() == 0 {
+        return false;
+    }
+    let expected_url = record.get("url").and_then(|value| value.as_str());
+    let expected_size = record.get("size").and_then(|value| value.as_u64());
+    let expected_sha = record.get("sha256").and_then(|value| value.as_str());
+    if expected_url != Some(entry.url.as_str()) || expected_size != Some(metadata.len()) {
+        return false;
+    }
+    match (expected_sha, hash_file_sha256(apk_path)) {
+        (Some(expected), Ok(actual)) => expected == actual,
+        _ => false,
+    }
+}
+
+fn write_cache_record(entry: &ApkEntry, apk_path: &Path) -> Result<()> {
+    let record = serde_json::json!({
+        "format": 1,
+        "url": entry.url,
+        "size": apk_path.metadata()?.len(),
+        "sha256": hash_file_sha256(apk_path)?,
+    });
+    let target = cache_record_path(apk_path);
+    let tmp = target.with_extension("json.part");
+    let data = serde_json::to_vec_pretty(&record)
+        .map_err(|e| GbstError::Download(format!("캐시 정보 직렬화 실패: {e}")))?;
+    std::fs::write(&tmp, data)?;
+    if target.exists() {
+        std::fs::remove_file(&target)?;
+    }
+    std::fs::rename(&tmp, &target)?;
+    Ok(())
+}
+
 fn canonical_catalog_package(package: &str) -> &str {
     let Some((base, suffix)) = package.rsplit_once('_') else {
         return package;
@@ -395,24 +522,28 @@ fn sort_download_tasks_largest_first(tasks: &mut [DownloadTask]) {
 }
 
 fn download_http_agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(15))
-        .timeout_read(Duration::from_secs(90))
-        .timeout_write(Duration::from_secs(30))
+    ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(15)))
+        .timeout_recv_body(Some(Duration::from_secs(90)))
+        .timeout_send_body(Some(Duration::from_secs(30)))
         .build()
+        .into()
 }
 
 fn remote_content_length(url: &str) -> u64 {
     let agent = download_http_agent();
     for candidate in download_url_candidates(url) {
-        let response = agent.head(&candidate)
-            .set("User-Agent", concat!("GBST/", env!("CARGO_PKG_VERSION")))
-            .set("Accept-Encoding", "identity")
+        let response = agent
+            .head(&candidate)
+            .header("User-Agent", concat!("GBST/", env!("CARGO_PKG_VERSION")))
+            .header("Accept-Encoding", "identity")
             .call();
 
         if let Ok(response) = response {
             if let Some(size) = response
-                .header("Content-Length")
+                .headers()
+                .get("Content-Length")
+                .and_then(|header| header.to_str().ok())
                 .and_then(|value| value.trim().parse::<u64>().ok())
                 .filter(|value| *value > 0)
             {
@@ -428,7 +559,11 @@ fn file_has_zip_magic(path: &Path) -> Result<bool> {
     let mut file = std::fs::File::open(path)?;
     let mut signature = [0_u8; 4];
     let read = file.read(&mut signature)?;
-    Ok(read == signature.len() && matches!(signature, [b'P', b'K', 3, 4] | [b'P', b'K', 5, 6] | [b'P', b'K', 7, 8]))
+    Ok(read == signature.len()
+        && matches!(
+            signature,
+            [b'P', b'K', 3, 4] | [b'P', b'K', 5, 6] | [b'P', b'K', 7, 8]
+        ))
 }
 
 fn download_to_file(url: &str, path: &Path) -> Result<()> {
@@ -442,22 +577,26 @@ fn download_to_file(url: &str, path: &Path) -> Result<()> {
     let agent = download_http_agent();
     let response = agent
         .get(url)
-        .set("User-Agent", concat!("GBST/", env!("CARGO_PKG_VERSION")))
-        .set(
+        .header("User-Agent", concat!("GBST/", env!("CARGO_PKG_VERSION")))
+        .header(
             "Accept",
             "application/vnd.android.package-archive, application/octet-stream, */*",
         )
-        .set("Accept-Encoding", "identity")
+        .header("Accept-Encoding", "identity")
         .call()
         .map_err(|err| GbstError::Download(format!("다운로드 실패: {err}")))?;
 
     let expected_content_length = response
-        .header("Content-Length")
+        .headers()
+        .get("Content-Length")
+        .and_then(|header| header.to_str().ok())
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|value| *value > 0);
 
     let content_type = response
-        .header("Content-Type")
+        .headers()
+        .get("Content-Type")
+        .and_then(|header| header.to_str().ok())
         .unwrap_or_default()
         .to_ascii_lowercase();
     if content_type.contains("text/html") {
@@ -466,7 +605,7 @@ fn download_to_file(url: &str, path: &Path) -> Result<()> {
         )));
     }
 
-    let mut reader = response.into_reader();
+    let mut reader = response.into_body().into_reader();
     let file = OpenOptions::new()
         .create(true)
         .truncate(true)
@@ -624,12 +763,17 @@ fn prune_download_dir(dir: &Path, expected_paths: &HashSet<PathBuf>) -> Result<(
             .and_then(|value| value.to_str())
             .unwrap_or_default();
         let is_temp = file_name.ends_with(".part");
+        let is_cache_record = file_name.ends_with(".apk.gbst-cache.json");
+        let stale_cache_record = is_cache_record && {
+            let apk_filename = file_name.trim_end_matches(".gbst-cache.json");
+            !expected_paths.contains(&dir.join(apk_filename))
+        };
         let is_apk = path
             .extension()
             .and_then(|value| value.to_str())
             .is_some_and(|value| value.eq_ignore_ascii_case("apk"));
 
-        if is_temp || (is_apk && !expected_paths.contains(&path)) {
+        if is_temp || stale_cache_record || (is_apk && !expected_paths.contains(&path)) {
             std::fs::remove_file(path)?;
         }
     }
@@ -648,24 +792,10 @@ fn sanitize_file_name(name: &str) -> String {
         .collect()
 }
 
-fn apk_download_progress_bar(current: usize, total: usize) -> String {
+fn apk_download_percent(current: usize, total: usize) -> u8 {
     let total = total.max(1);
     let current = current.min(total);
-    let percent = if current >= total {
-        100
-    } else {
-        ((current as f32 / total as f32) * 100.0).round() as usize
-    };
-    let total_blocks = 20usize;
-    let filled = ((percent.min(100) * total_blocks) + 50) / 100;
-    let empty = total_blocks.saturating_sub(filled);
-
-    format!(
-        "[{}{}] {}%",
-        "█".repeat(filled),
-        "·".repeat(empty),
-        percent.min(100)
-    )
+    ((current as f64 * 100.0 / total as f64).round() as u8).min(100)
 }
 
 #[cfg(test)]
@@ -673,20 +803,89 @@ mod tests {
     use super::*;
 
     #[test]
+    fn apk_download_progress_uses_numeric_events_instead_of_text_blocks() {
+        assert_eq!(apk_download_percent(0, 4), 0);
+        assert_eq!(apk_download_percent(1, 4), 25);
+        assert_eq!(apk_download_percent(3, 4), 75);
+        assert_eq!(apk_download_percent(4, 4), 100);
+        assert_eq!(apk_download_percent(10, 4), 100);
+        assert_eq!(apk_download_percent(0, 0), 0);
+    }
+
+    #[test]
+    fn all_bundled_release_assets_have_pinned_sha256() {
+        let catalog =
+            crate::apk_catalog::ApkCatalog::parse(crate::apk_catalog::BUNDLED_APK_CATALOG_TEXT)
+                .unwrap();
+        for major in 13..=17 {
+            for entry in catalog.entries_for_android(major).unwrap() {
+                let hash = expected_pinned_sha256(&entry.url);
+                assert!(hash.is_some(), "Missing pinned hash: {}", entry.url);
+                assert_eq!(hash.unwrap().len(), 64);
+            }
+        }
+    }
+
+    #[test]
+    fn cached_apks_are_invalidated_when_url_or_bytes_change() {
+        let temp = std::env::temp_dir().join(format!(
+            "gbst-cache-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp).unwrap();
+        let apk = temp.join("sample.apk");
+        let entry = ApkEntry {
+            android_major: 16,
+            package: "com.example".into(),
+            url: "https://example.com/v1.apk".into(),
+            line_no: 1,
+        };
+        std::fs::write(&apk, b"sample bytes").unwrap();
+        assert!(!cached_file_matches_catalog(&entry, &apk));
+        write_cache_record(&entry, &apk).unwrap();
+        assert!(cached_file_matches_catalog(&entry, &apk));
+        let mut newer = entry.clone();
+        newer.url = "https://example.com/v2.apk".into();
+        assert!(!cached_file_matches_catalog(&newer, &apk));
+        std::fs::write(&apk, b"tampered data").unwrap();
+        assert!(!cached_file_matches_catalog(&entry, &apk));
+        std::fs::remove_dir_all(&temp).unwrap();
+    }
+
+    #[test]
     fn sorts_download_tasks_largest_first() {
         let mut tasks = vec![
             DownloadTask {
-                entry: ApkEntry { android_major: 16, package: "small".into(), url: "https://example.com/small.apk".into(), line_no: 1 },
+                entry: ApkEntry {
+                    android_major: 16,
+                    package: "small".into(),
+                    url: "https://example.com/small.apk".into(),
+                    line_no: 1,
+                },
                 local_path: PathBuf::from("small.apk"),
                 expected_size: 10,
             },
             DownloadTask {
-                entry: ApkEntry { android_major: 16, package: "large".into(), url: "https://example.com/large.apk".into(), line_no: 2 },
+                entry: ApkEntry {
+                    android_major: 16,
+                    package: "large".into(),
+                    url: "https://example.com/large.apk".into(),
+                    line_no: 2,
+                },
                 local_path: PathBuf::from("large.apk"),
                 expected_size: 300,
             },
             DownloadTask {
-                entry: ApkEntry { android_major: 16, package: "medium".into(), url: "https://example.com/medium.apk".into(), line_no: 3 },
+                entry: ApkEntry {
+                    android_major: 16,
+                    package: "medium".into(),
+                    url: "https://example.com/medium.apk".into(),
+                    line_no: 3,
+                },
                 local_path: PathBuf::from("medium.apk"),
                 expected_size: 100,
             },

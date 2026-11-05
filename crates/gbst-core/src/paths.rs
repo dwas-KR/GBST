@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -75,6 +76,10 @@ pub fn logs_dir() -> PathBuf {
     runtime_root().join("logs")
 }
 
+pub fn diagnostic_logs_dir() -> PathBuf {
+    config_root().join("logs").join("diagnostics")
+}
+
 pub fn log_file_path() -> PathBuf {
     let stamp = chrono::Local::now().format("%Y-%m-%d_%H-%M");
     logs_dir().join(format!("GBST_{stamp}.txt"))
@@ -130,10 +135,7 @@ fn migrate_legacy_adb_path() -> std::io::Result<()> {
 }
 
 fn migrate_legacy_language_path() -> std::io::Result<()> {
-    move_or_remove_legacy_file(
-        &legacy_language_config_path(),
-        &language_config_path(),
-    )
+    move_or_remove_legacy_file(&legacy_language_config_path(), &language_config_path())
 }
 
 pub fn migrate_legacy_paths() -> std::io::Result<()> {

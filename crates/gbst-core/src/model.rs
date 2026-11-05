@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -51,7 +52,6 @@ pub struct DeviceInfo {
     pub android_version: String,
     pub android_major: AndroidMajor,
 }
-
 
 pub const GOOGLE_REQUIRED_PACKAGES: [&str; 7] = [
     "com.google.android.gms",
@@ -157,4 +157,18 @@ pub enum PlanStep {
 pub struct InstallPlan {
     pub android_major: AndroidMajor,
     pub steps: Vec<PlanStep>,
+}
+
+/// Android 17 excludes packages intentionally omitted by its APK catalog.
+pub fn required_google_packages(android: AndroidMajor) -> &'static [&'static str] {
+    match android {
+        AndroidMajor::Android17 => &[
+            "com.google.android.gms",
+            "com.google.android.configupdater",
+            "com.google.android.partnersetup",
+            "com.google.android.gsf",
+            "com.android.vending",
+        ],
+        _ => &GOOGLE_REQUIRED_PACKAGES,
+    }
 }

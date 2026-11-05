@@ -1,4 +1,5 @@
-use adb_client::usb::{find_all_connected_adb_devices, ADBUSBDevice};
+// SPDX-License-Identifier: GPL-3.0-only
+use adb_client::usb::{ADBUSBDevice, find_all_connected_adb_devices};
 use adb_client::{ADBDeviceExt, RebootType};
 use gbst_core::apk_metadata::{
     apk_version_code_candidates_from_dir, apk_version_code_candidates_from_local_apks,
@@ -7,29 +8,28 @@ use gbst_core::apk_metadata::{
 use gbst_core::error::{GbstError, Result};
 use gbst_core::model::{
     AndroidMajor, DashboardInfo, DeviceInfo, FailurePolicy, InstallPlan, LocalApk, PlanStep,
-    GOOGLE_REQUIRED_PACKAGES,
+    required_google_packages,
 };
 use gbst_core::paths;
-use rsa::pkcs8::{EncodePrivateKey, LineEnding};
+use rsa::pkcs1::DecodeRsaPrivateKey;
+use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
+use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 #[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
 #[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const ADB_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
-const ADB_REBOOT_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+const ADB_REBOOT_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 const ADB_POLL_INTERVAL: Duration = Duration::from_millis(200);
-const ADB_CONNECT_RETRY_ATTEMPTS: usize = 5;
-const ADB_CONNECT_RETRY_BACKOFF: Duration = Duration::from_millis(400);
+const ADB_CONNECT_RETRY_ATTEMPTS: usize = 10;
+const ADB_CONNECT_RETRY_BACKOFF: Duration = Duration::from_millis(150);
 const ADB_TRANSPORT_RETRY_ATTEMPTS: usize = 5;
 const ADB_TRANSPORT_RETRY_BACKOFF: Duration = Duration::from_millis(900);
 const ADB_PUSH_RETRY_ATTEMPTS: usize = 5;
@@ -44,8 +44,7 @@ enum AdbWaitLogMode {
     Reboot,
 }
 
-pub const ADB_UNAUTHORIZED_GUIDE: &str =
-    "[안내] PC(노트북)와 연결한 태블릿에 잠금 해제 → 메세지 창 왼쪽 중간 체크 박스 체크 → 오른쪽 하단 Allow(허용)를 터치해주세요.";
+pub const ADB_UNAUTHORIZED_GUIDE: &str = "[ADB] USB 디버깅 인증 필요: 태블릿의 잠금을 해제한 뒤 '이 컴퓨터에서 항상 허용'을 선택하고 '허용'을 누르세요.";
 
 const PREPARATION_LOG: &str =
     "[GBST] PC(노트북)에 파일 및 구성 요소 환경과 구글 서비스 설치, 복구, 업데이트를 준비합니다.";
@@ -77,7 +76,6 @@ struct GooglePackageState {
     version_code: Option<u64>,
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdbUsbState {
     NoDevice,
@@ -89,11 +87,17 @@ pub enum AdbUsbState {
     Error(String),
 }
 
+/// The only GBST-owned staging directory on the Android device.
+pub const GBST_DEVICE_TEMP_DIR: &str = "/data/local/tmp/dwas_kr/GBST";
+const GBST_CLEANUP_MARKER: &str = "__GBST_DEVICE_TEMP_CLEANED__";
+
 pub struct DirectAdb {
     device: Option<ADBUSBDevice>,
     serial: Option<String>,
     connected_once: bool,
     cached_bootmode: Option<&'static str>,
+    pinned_serial: Option<String>,
+    staged_apks: Vec<String>,
 }
 
 impl DirectAdb {
@@ -103,6 +107,8 @@ impl DirectAdb {
             serial: None,
             connected_once: false,
             cached_bootmode: None,
+            pinned_serial: None,
+            staged_apks: Vec::new(),
         }
     }
 
@@ -157,25 +163,38 @@ impl DirectAdb {
                     Ok(AdbUsbState::Ready)
                 }
             }
-            Err(_) => {
+            Err(err) => {
                 self.drop_device();
-
-                if adb_server_running() {
+                let detail = err.to_string();
+                record_adb_diagnostic("USB 상태 조회", &detail);
+                let lowered = detail.to_ascii_lowercase();
+                if (lowered.contains("busy")
+                    || lowered.contains("claim")
+                    || lowered.contains("access denied")
+                    || lowered.contains("in use"))
+                    && adb_server_running()
+                {
                     Ok(AdbUsbState::ServerBlocking)
-                } else {
+                } else if lowered.contains("unauthorized")
+                    || lowered.contains("authentication")
+                    || lowered.contains("rsa")
+                {
                     Ok(AdbUsbState::Unauthorized)
+                } else {
+                    Ok(AdbUsbState::Error(format!(
+                        "USB 연결 실패: {detail}. 케이블, 디버깅 인증, USB 드라이버 및 다른 ADB 프로그램을 확인하세요."
+                    )))
                 }
             }
         }
     }
 
-    pub fn wait_ready<F>(&mut self, mut on_log: F) -> Result<()>
+    pub fn wait_ready<F>(&mut self, on_log: F) -> Result<()>
     where
         F: FnMut(String),
     {
         prepare_adb_usb_environment();
-
-        on_log(ADB_UNAUTHORIZED_GUIDE.to_string());
+        // Show the authorization prompt only when USB state is Unauthorized.
         self.wait_ready_until(ADB_WAIT_TIMEOUT, on_log)
     }
 
@@ -195,12 +214,7 @@ impl DirectAdb {
     where
         F: FnMut(String),
     {
-        self.wait_ready_until_with_mode(
-            timeout,
-            on_log,
-            AdbWaitLogMode::Reboot,
-            previous_boot_id,
-        )
+        self.wait_ready_until_with_mode(timeout, on_log, AdbWaitLogMode::Reboot, previous_boot_id)
     }
 
     fn wait_ready_until_with_mode<F>(
@@ -216,7 +230,7 @@ impl DirectAdb {
         let deadline = Instant::now() + timeout;
         let mut spinner_index = 0usize;
         let mut current_state = "ADB USB 기기 감지 대기 중입니다.".to_string();
-        let mut authorization_guide_emitted = mode == AdbWaitLogMode::Detect;
+        let mut authorization_guide_emitted = false;
 
         let spinner_key = match mode {
             AdbWaitLogMode::Detect => "adb_detect",
@@ -229,10 +243,16 @@ impl DirectAdb {
 
             match mode {
                 AdbWaitLogMode::Detect => {
-                    on_log(spinner_log(spinner_key, &format!("[ADB] 기기 감지 중... {frame}")));
+                    on_log(spinner_log(
+                        spinner_key,
+                        &format!("[ADB] 기기 감지 중... {frame}"),
+                    ));
                 }
                 AdbWaitLogMode::Reboot => {
-                    on_log(spinner_log(spinner_key, &format!("[ADB] 기기 재부팅 중... {frame}")));
+                    on_log(spinner_log(
+                        spinner_key,
+                        &format!("[ADB] 기기 재부팅 중... {frame}"),
+                    ));
                 }
             }
 
@@ -250,8 +270,7 @@ impl DirectAdb {
                             } else {
                                 (
                                     None,
-                                    self.shell("getprop sys.boot_completed")
-                                        .unwrap_or_default(),
+                                    self.shell("getprop sys.boot_completed").unwrap_or_default(),
                                 )
                             };
 
@@ -283,7 +302,8 @@ impl DirectAdb {
                     Ok(AdbUsbState::NoDevice) => "ADB USB 기기 감지 대기 중입니다.".to_string(),
                     Ok(AdbUsbState::MultipleDevices) => {
                         return Err(GbstError::Adb(
-                            "ADB 기기가 2대 이상 연결되어 있습니다. 하나만 연결해주세요.".to_string(),
+                            "ADB 기기가 2대 이상 연결되어 있습니다. 하나만 연결해주세요."
+                                .to_string(),
                         ));
                     }
                     Ok(AdbUsbState::Unauthorized) => {
@@ -320,9 +340,15 @@ impl DirectAdb {
     }
 
     pub fn read_device_info(&mut self) -> Result<DeviceInfo> {
-        let manufacturer = self.shell("getprop ro.product.manufacturer")?.trim().to_string();
+        let manufacturer = self
+            .shell("getprop ro.product.manufacturer")?
+            .trim()
+            .to_string();
         let model = self.read_model_identity();
-        let android_version = self.shell("getprop ro.build.version.release")?.trim().to_string();
+        let android_version = self
+            .shell("getprop ro.build.version.release")?
+            .trim()
+            .to_string();
 
         if !manufacturer.eq_ignore_ascii_case("Lenovo") {
             return Err(GbstError::Device(format!(
@@ -431,7 +457,20 @@ impl DirectAdb {
     }
 
     pub fn shell(&mut self, command: &str) -> Result<String> {
-        self.shell_inner(command)
+        let output = self.shell_inner(command)?;
+        let trimmed = output.trim();
+        let package_command = command.starts_with("pm ") || command.starts_with("cmd package ");
+        if package_command
+            && !command.starts_with("pm install ")
+            && (trimmed.starts_with("Failure [")
+                || trimmed.starts_with("Error:")
+                || trimmed.starts_with("Exception occurred"))
+        {
+            return Err(GbstError::Adb(format!(
+                "Android 패키지 명령 실패: {command}: {trimmed}"
+            )));
+        }
+        Ok(output)
     }
 
     fn read_first_non_empty_property(&mut self, properties: &[&str]) -> String {
@@ -564,24 +603,32 @@ impl DirectAdb {
         Ok(())
     }
 
-    pub fn assess_google_services_from_downloaded_apks(&mut self, apks: &[LocalApk]) -> GoogleServiceAction {
+    pub fn assess_google_services_from_downloaded_apks(
+        &mut self,
+        android_major: AndroidMajor,
+        apks: &[LocalApk],
+    ) -> GoogleServiceAction {
         let local_versions = apk_version_code_candidates_from_local_apks(apks);
-        self.assess_google_services_with_versions(&local_versions)
+        self.assess_google_services_with_versions(android_major, &local_versions)
     }
 
-    pub fn assess_google_services_from_apk_dir(&mut self, android_major: AndroidMajor) -> GoogleServiceAction {
+    pub fn assess_google_services_from_apk_dir(
+        &mut self,
+        android_major: AndroidMajor,
+    ) -> GoogleServiceAction {
         let apk_dir = paths::apk_download_dir(android_major.value());
         let local_versions = apk_version_code_candidates_from_dir(&apk_dir);
-        self.assess_google_services_with_versions(&local_versions)
+        self.assess_google_services_with_versions(android_major, &local_versions)
     }
 
     fn assess_google_services_with_versions(
         &mut self,
+        android_major: AndroidMajor,
         local_versions: &std::collections::BTreeMap<String, Vec<u64>>,
     ) -> GoogleServiceAction {
         let mut update_required = false;
 
-        for package in GOOGLE_REQUIRED_PACKAGES {
+        for &package in required_google_packages(android_major) {
             let state = self.read_google_package_state(package);
 
             if !state.installed_for_user || state.disabled {
@@ -606,6 +653,69 @@ impl DirectAdb {
         } else {
             GoogleServiceAction::Normal
         }
+    }
+
+    /// Post-install safety net. The existing four-stage Google restore plan is
+    /// unchanged: only re-enable a package that is still disabled for user 0
+    /// after the last reboot, then verify the actual PackageManager state.
+    /// Missing packages are reported, never silently counted as healthy.
+    pub fn restore_disabled_google_packages_after_install<F>(
+        &mut self,
+        android_major: AndroidMajor,
+        mut on_log: F,
+    ) -> bool
+    where
+        F: FnMut(String),
+    {
+        let mut changed = false;
+        for &package in required_google_packages(android_major) {
+            let mut state = self.read_google_package_state(package);
+            if !state.installed_for_user {
+                on_log(format!(
+                    "[ADB] {package}: 사용자 0에 등록되지 않아 최종 검증을 통과할 수 없습니다."
+                ));
+                continue;
+            }
+            let Some(command) = post_install_reenable_command(package, &state) else {
+                continue;
+            };
+
+            on_log(format!(
+                "[ADB] {package}: 사용자 0에서 사용 중지 상태입니다. 활성화를 시도합니다."
+            ));
+            let mut restored = false;
+            for attempt in 1..=2 {
+                if attempt > 1 {
+                    on_log(format!(
+                        "[ADB] {package}: 사용자 0 활성화 재시도 {attempt}/2"
+                    ));
+                }
+                if let Err(err) = self.shell(&command) {
+                    record_adb_diagnostic(
+                        "Google 사용자 0 활성화 명령 오류",
+                        &format!("{package}: {err}"),
+                    );
+                    on_log(format!(
+                        "[ADB] {package}: 사용자 0 활성화 명령 오류. 진단 로그를 확인하세요."
+                    ));
+                }
+                // ADB transport success does not prove a package was enabled.
+                thread::sleep(Duration::from_millis(500));
+                state = self.read_google_package_state(package);
+                if state.installed_for_user && !state.disabled {
+                    on_log(format!("[ADB] {package}: 사용자 0 활성화 및 검증 완료"));
+                    changed = true;
+                    restored = true;
+                    break;
+                }
+            }
+            if !restored {
+                on_log(format!(
+                    "[ADB] {package}: 사용자 0 활성화 후에도 사용 중지 상태입니다."
+                ));
+            }
+        }
+        changed
     }
 
     fn read_google_package_state(&mut self, package: &str) -> GooglePackageState {
@@ -670,7 +780,11 @@ impl DirectAdb {
 
     fn pm_path_exists(&mut self, package: &str) -> bool {
         self.shell(&format!("pm path {package}"))
-            .map(|output| output.lines().any(|line| line.trim().starts_with("package:")))
+            .map(|output| {
+                output
+                    .lines()
+                    .any(|line| line.trim().starts_with("package:"))
+            })
             .unwrap_or(false)
     }
 
@@ -699,6 +813,7 @@ impl DirectAdb {
     }
 
     fn shell_inner(&mut self, command: &str) -> Result<String> {
+        let started = Instant::now();
         let mut last_error: Option<String> = None;
 
         for attempt in 0..ADB_TRANSPORT_RETRY_ATTEMPTS {
@@ -717,7 +832,18 @@ impl DirectAdb {
             };
 
             match result {
-                Ok(_) => return Ok(String::from_utf8_lossy(&stdout).trim().to_string()),
+                Ok(_) => {
+                    let summary = command
+                        .split_whitespace()
+                        .take(4)
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    record_adb_diagnostic(
+                        "ADB Shell OK",
+                        &format!("{summary} ({}ms)", started.elapsed().as_millis()),
+                    );
+                    return Ok(String::from_utf8_lossy(&stdout).trim().to_string());
+                }
                 Err(err) => {
                     self.drop_device();
                     let stderr_text = String::from_utf8_lossy(&stderr).trim().to_string();
@@ -734,9 +860,10 @@ impl DirectAdb {
             }
         }
 
-        Err(GbstError::Adb(last_error.unwrap_or_else(|| {
-            format!("ADB shell 실패 `{command}`: 알 수 없는 전송 오류")
-        })))
+        let detail = last_error
+            .unwrap_or_else(|| format!("ADB shell 실패 `{command}`: 알 수 없는 전송 오류"));
+        record_adb_diagnostic("ADB shell 전송", &detail);
+        Err(GbstError::Adb(detail))
     }
 
     pub fn install_apk_with_pm(&mut self, package: &str, apk_path: &Path) -> Result<String> {
@@ -762,19 +889,57 @@ impl DirectAdb {
                 ))
             })?;
 
-        let remote_dir = "/data/local/tmp/gbst";
+        // Stage APKs only in GBST's private, temporary ADB shell working tree.
+        // No APKs are placed in the user's Download directory.
+        let remote_dir = GBST_DEVICE_TEMP_DIR;
         let remote_path = format!("{remote_dir}/{file_name}");
 
+        // A previous interrupted run may have removed a Google package for user 0.
+        // Restore the already known package before attempting a version update.
+        if !self.package_list_contains_user_zero(package)
+            && self.read_existing_package_version_code(package).is_some()
+        {
+            on_log(format!(
+                "[ADB] {package}: 사용자 0 등록 상태 복구를 먼저 시도합니다."
+            ));
+            if self.try_install_existing_for_user(package) {
+                on_log(format!("[ADB] {package}: 사용자 0 패키지 등록 복원 완료"));
+            }
+        }
+
         if self.try_reuse_existing_package_for_user(package, apk_path)? {
+            on_log(format!(
+                "[APK] {package}: 설치 버전이 같거나 높아 기존 패키지를 재사용합니다."
+            ));
             return Ok("Existing package reused for user 0".to_string());
         }
 
+        on_log(format!(
+            "[APK] {package}: {remote_path} 경로로 APK 전송을 시작합니다."
+        ));
         self.prepare_remote_apk_dir(remote_dir)?;
+        if !self.staged_apks.contains(&remote_path) {
+            self.staged_apks.push(remote_path.clone());
+        }
         self.push_file_with_retry(apk_path, &remote_path, package, &mut on_log)?;
 
         self.drop_device();
-        let install_result = self.shell(&format!(
-            "pm install -r -d -g --user 0 {remote_path}"
+        let started = Instant::now();
+        on_log(format!(
+            "[APK] {package}: APK 전송 검증 완료, Android 패키지 설치 명령을 실행합니다."
+        ));
+        let has_timeout = self
+            .shell("command -v timeout")
+            .is_ok_and(|output| output.lines().any(|line| line.trim().ends_with("/timeout")));
+        let install_command = if has_timeout {
+            format!("timeout -k 5 90 pm install -r -d -g --user 0 {remote_path}")
+        } else {
+            format!("pm install -r -d -g --user 0 {remote_path}")
+        };
+        let install_result = self.shell(&install_command);
+        on_log(format!(
+            "[APK] {package}: 설치 명령 반환, 경과 {}초",
+            started.elapsed().as_secs()
         ));
         let _ = self.shell(&format!("rm -f {remote_path}"));
 
@@ -783,25 +948,32 @@ impl DirectAdb {
             if is_signature_update_incompatible(&output)
                 && self.try_install_existing_for_user(package)
             {
-                return Ok(output);
+                return Err(GbstError::Adb(format!(
+                    "APK 서명 불일치로 설치에 실패했습니다. 기존 패키지는 복구되었습니다: {package}: {}",
+                    compact_pm_output(&output)
+                )));
             }
 
+            let detail = format!("APK 설치 실패: {package}: {}", compact_pm_output(&output));
+            record_adb_diagnostic("APK 설치", &detail);
+            return Err(GbstError::Adb(detail));
+        }
+
+        if !pm_install_explicitly_succeeded(&output) {
             return Err(GbstError::Adb(format!(
-                "APK 설치 실패: {package}: {}",
+                "APK 설치 완료(Success) 응답을 받지 못했습니다: {package}: {}",
                 compact_pm_output(&output)
             )));
         }
 
-        if pm_install_explicitly_succeeded(&output)
-            || self.wait_for_user_package(package, 6, Duration::from_millis(500))
-        {
-            return Ok(output);
+        if !self.wait_for_user_package(package, 6, Duration::from_millis(500)) {
+            return Err(GbstError::Adb(format!(
+                "APK 설치 성공 응답을 받았지만 사용자 0의 패키지 등록을 확인하지 못했습니다: {package}"
+            )));
         }
 
-        Err(GbstError::Adb(format!(
-            "APK 설치 결과를 확인하지 못했습니다: {package}: {}",
-            compact_pm_output(&output)
-        )))
+        on_log(format!("[APK] {package}: 설치 성공 및 패키지 등록 확인"));
+        Ok(output)
     }
 
     fn try_reuse_existing_package_for_user(
@@ -858,18 +1030,106 @@ impl DirectAdb {
             .unwrap_or(false)
     }
 
+    /// Remove only GBST's Android staging directory. The shared dwas_kr
+    /// parent is removed only when empty, preserving other dwas_kr data.
+    /// A positive shell marker and filesystem check are mandatory because
+    /// the direct ADB shell protocol may not expose the command exit code.
     pub fn cleanup_gbst_temp_files(&mut self) -> Result<()> {
-        let _ = self.shell("rm -rf /data/local/tmp/gbst")?;
+        let output = self.shell(gbst_device_cleanup_command())?;
+        if !output
+            .lines()
+            .any(|line| line.trim() == GBST_CLEANUP_MARKER)
+        {
+            return Err(GbstError::Adb(format!(
+                "GBST 임시 폴더 삭제를 확인하지 못했습니다: {GBST_DEVICE_TEMP_DIR}: {output}"
+            )));
+        }
+        self.staged_apks.clear();
         Ok(())
+    }
+
+    /// Retry cleanup on a fresh USB connection, including after a cancelled
+    /// or failed installation. Avoid claiming a clean device on USB errors.
+    pub fn cleanup_gbst_temp_files_with_retry<F>(&mut self, mut on_log: F) -> Result<()>
+    where
+        F: FnMut(String),
+    {
+        let mut last_error = None;
+        for attempt in 1..=3 {
+            self.drop_device();
+            match self.cleanup_gbst_temp_files() {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    on_log(format!(
+                        "[ADB] 임시 폴더 삭제 재시도 {attempt}/3 실패: {err}"
+                    ));
+                    last_error = Some(err);
+                    if attempt < 3 {
+                        thread::sleep(Duration::from_secs(2));
+                    }
+                }
+            }
+        }
+        Err(last_error.unwrap_or_else(|| {
+            GbstError::Adb("기기 임시 폴더 삭제 결과를 확인하지 못했습니다.".to_string())
+        }))
+    }
+
+    /// Remove the four explicitly named tablet cache/data folders requested by the user.
+    /// Verify the Lenovo manufacturer and each deletion result before proceeding.
+    /// No user-supplied shell paths or wildcards are accepted.
+    pub fn cleanup_dwas_kr_folders(&mut self) -> Result<()> {
+        let device = self.read_device_info()?;
+        if !device.manufacturer.eq_ignore_ascii_case("Lenovo") {
+            return Err(GbstError::Adb(
+                "기기 임시 폴더 정리는 Lenovo 기기에만 허용됩니다.".to_string(),
+            ));
+        }
+        let output = self.shell(dwas_kr_full_cleanup_command())?;
+        if !output
+            .lines()
+            .any(|line| line.trim() == DWAS_KR_FULL_CLEANUP_MARKER)
+        {
+            return Err(GbstError::Adb(format!(
+                "네 GBST 데이터/캐시 폴더 정리를 확인하지 못했습니다: {output}"
+            )));
+        }
+        self.staged_apks.clear();
+        Ok(())
+    }
+
+    pub fn cleanup_dwas_kr_folders_with_retry<F>(&mut self, mut on_log: F) -> Result<()>
+    where
+        F: FnMut(String),
+    {
+        let mut last_error = None;
+        for attempt in 1..=3 {
+            self.drop_device();
+            match self.cleanup_dwas_kr_folders() {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    on_log(format!(
+                        "[ADB] GBST 데이터/캐시 폴더 정리 {attempt}/3 실패: {error}"
+                    ));
+                    last_error = Some(error);
+                    if attempt < 3 {
+                        thread::sleep(Duration::from_secs(2));
+                    }
+                }
+            }
+        }
+        Err(last_error
+            .unwrap_or_else(|| GbstError::Adb("GBST 데이터/캐시 폴더 정리 확인 실패".to_string())))
     }
 
     fn prepare_remote_apk_dir(&mut self, remote_dir: &str) -> Result<()> {
         self.reclaim_direct_usb_interface();
         self.shell(&format!("mkdir -p {remote_dir}"))?;
-        let probe = self.shell(&format!(
-            "test -d {remote_dir} && echo __GBST_DIR_READY__"
-        ))?;
-        if !probe.lines().any(|line| line.trim() == "__GBST_DIR_READY__") {
+        let probe = self.shell(&format!("test -d {remote_dir} && echo __GBST_DIR_READY__"))?;
+        if !probe
+            .lines()
+            .any(|line| line.trim() == "__GBST_DIR_READY__")
+        {
             return Err(GbstError::Adb(format!(
                 "기기 임시 폴더 준비 상태를 확인하지 못했습니다: {remote_dir}"
             )));
@@ -879,32 +1139,34 @@ impl DirectAdb {
     }
 
     fn reclaim_direct_usb_interface(&mut self) {
+        // Unlike the previous implementation, never kill other ADB owners.
         self.drop_device();
-        if cfg!(windows) {
-            let _ = hidden_command_output("taskkill", &["/F", "/IM", "adb.exe"]);
-        }
-        if adb_server_running() {
-            let _ = kill_adb_server_direct();
-        }
     }
 
     fn push_file_with_retry<F>(
         &mut self,
         apk_path: &Path,
         remote_path: &str,
-        _package: &str,
+        package: &str,
         on_log: &mut F,
     ) -> Result<()>
     where
         F: FnMut(String),
     {
         let local_size = std::fs::metadata(apk_path)?.len();
+        let local_sha256 = sha256_of_file(apk_path)?;
         let mut last_error: Option<String> = None;
 
         for attempt in 0..ADB_PUSH_RETRY_ATTEMPTS {
             self.reclaim_direct_usb_interface();
             let file = File::open(apk_path)?;
-            let mut progress_callback = |_transferred: u64, _total: u64, _percent: u8| {};
+            let mut last_reported = 0u8;
+            let mut progress_callback = |_transferred: u64, _total: u64, percent: u8| {
+                if percent >= last_reported.saturating_add(10) || percent == 100 {
+                    last_reported = percent;
+                    on_log(format!("[APK] {package}: 기기 전송 진행률 {percent}%"));
+                }
+            };
             let mut reader = ProgressReader::new(file, local_size, &mut progress_callback);
 
             let result = match self.connect_device() {
@@ -914,12 +1176,32 @@ impl DirectAdb {
                 Err(err) => Err(err.to_string()),
             };
 
+            // Release the progress callback's mutable borrow before emitting
+            // status messages about transfer verification or retries.
+            drop(reader);
+            drop(progress_callback);
+
             match result {
                 Ok(()) => {
                     self.drop_device();
                     match self.remote_file_size(remote_path) {
                         Ok(remote_size) if remote_size == local_size => {
-                            return Ok(());
+                            match self.remote_file_sha256(remote_path) {
+                                Ok(remote_sha256)
+                                    if remote_sha256.eq_ignore_ascii_case(&local_sha256) =>
+                                {
+                                    on_log(format!(
+                                        "[APK] {package}: 기기 전송 파일 크기 및 SHA-256 검증 완료"
+                                    ));
+                                    return Ok(());
+                                }
+                                Ok(remote_sha256) => {
+                                    last_error = Some(format!(
+                                        "APK 전송 SHA-256 불일치: PC={local_sha256}, 기기={remote_sha256}"
+                                    ));
+                                }
+                                Err(err) => last_error = Some(err.to_string()),
+                            }
                         }
                         Ok(remote_size) => {
                             last_error = Some(format!(
@@ -962,6 +1244,22 @@ impl DirectAdb {
             .ok_or_else(|| {
                 GbstError::Adb(format!(
                     "기기에 전송된 APK 파일 크기를 확인하지 못했습니다: {remote_path}"
+                ))
+            })
+    }
+
+    fn remote_file_sha256(&mut self, remote_path: &str) -> Result<String> {
+        let output = self.shell(&format!("sha256sum {remote_path}"))?;
+        output
+            .split_whitespace()
+            .next()
+            .filter(|digest| {
+                digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+            .map(str::to_ascii_lowercase)
+            .ok_or_else(|| {
+                GbstError::Adb(format!(
+                    "기기에 전송된 APK SHA-256을 확인하지 못했습니다: {remote_path}"
                 ))
             })
     }
@@ -1100,7 +1398,9 @@ impl DirectAdb {
             .unwrap_or_default();
 
         if output.trim().is_empty() {
-            output = self.shell(&format!("appops get {package}")).unwrap_or_default();
+            output = self
+                .shell(&format!("appops get {package}"))
+                .unwrap_or_default();
         }
 
         let mut ops: Vec<String> = Vec::new();
@@ -1133,7 +1433,12 @@ impl DirectAdb {
         ops
     }
 
-    fn allow_existing_appops<F>(&mut self, package: &str, ops: &[String], mut on_log: F) -> Result<()>
+    fn allow_existing_appops<F>(
+        &mut self,
+        package: &str,
+        ops: &[String],
+        mut on_log: F,
+    ) -> Result<()>
     where
         F: FnMut(String),
     {
@@ -1187,7 +1492,21 @@ impl DirectAdb {
         }
     }
 
-    pub fn execute_plan<F>(&mut self, plan: &InstallPlan, mut on_log: F) -> Result<()>
+    pub fn execute_plan<F>(&mut self, plan: &InstallPlan, on_log: F) -> Result<()>
+    where
+        F: FnMut(String),
+    {
+        self.execute_plan_interruptible(plan, &AtomicBool::new(false), on_log)
+    }
+
+    /// Cooperative cancellation at safe step boundaries; never interrupts a running
+    /// package install, file transfer or reboot command mid-flight.
+    pub fn execute_plan_interruptible<F>(
+        &mut self,
+        plan: &InstallPlan,
+        cancelled: &AtomicBool,
+        mut on_log: F,
+    ) -> Result<()>
     where
         F: FnMut(String),
     {
@@ -1198,59 +1517,71 @@ impl DirectAdb {
         let mut preparation_emitted = false;
         let mut device_connect_prep_emitted = false;
         let mut finalize_emitted = false;
+        let progress_total = plan.steps.len().max(1);
 
-        for step in &plan.steps {
+        for (step_index, step) in plan.steps.iter().enumerate() {
+            if cancelled.load(Ordering::Relaxed) {
+                return Err(GbstError::Adb(
+                    "사용자 요청으로 작업을 안전한 단계 경계에서 중단했습니다. 이미 적용된 기기 변경은 자동으로 되돌리지 않습니다.".to_owned(),
+                ));
+            }
             if let Some(stage) = infer_google_stage(step, google_stage) {
                 google_stage = Some(stage);
                 let stage_index = stage as usize;
                 if stage_index < google_stage_guide_emitted.len()
-                    && !google_stage_guide_emitted[stage_index]
+                    && mark_google_stage_started(stage, &mut google_stage_guide_emitted)
                 {
                     emit_google_restore_wait_guide(&mut on_log);
-                    google_stage_guide_emitted[stage_index] = true;
+                    // Text is emitted once per phase. GUI progress events keep
+                    // updating for every completed step below.
+                    on_log(google_stage_progress_log(
+                        stage,
+                        0,
+                        stage_totals[stage_index],
+                    ));
                 }
             }
 
+            let stage = google_stage.unwrap_or_default();
+            on_log(format!(
+                "__GBST_PLAN_PROGRESS__|{step_index}|{progress_total}|0|{stage}"
+            ));
             let display_label = display_label_for_step(step, google_stage);
             let spinner_key = spinner_key_for_step(step, google_stage);
 
-            if let Some(stage) = google_stage {
-                if display_label
+            // Stage percentage represents completed work, not the step merely started.
+            let count_completed_step = google_stage.is_some()
+                && display_label
                     .as_deref()
-                    .is_some_and(|label| label.starts_with("구글 서비스 작업 중"))
-                {
-                    stage_positions[stage as usize] = stage_positions[stage as usize].saturating_add(1);
-                    on_log(google_stage_progress_log(
-                        stage,
-                        stage_positions[stage as usize],
-                        stage_totals[stage as usize],
-                    ));
-                }
-            } else if let Some(label) = display_label.as_deref() {
-                if label == PREPARATION_LOG {
-                    if !preparation_emitted {
-                        preparation_emitted = true;
+                    .is_some_and(|label| label.starts_with("구글 서비스 작업 중"));
+            if google_stage.is_none() {
+                if let Some(label) = display_label.as_deref() {
+                    if label == PREPARATION_LOG {
+                        if !preparation_emitted {
+                            preparation_emitted = true;
+                            on_log(label.to_string());
+                        }
+                    } else if label == DEVICE_CONNECT_PREP_LOG {
+                        if !device_connect_prep_emitted {
+                            device_connect_prep_emitted = true;
+                            on_log(label.to_string());
+                        }
+                    } else if label == FINALIZE_LOG {
+                        if !finalize_emitted {
+                            finalize_emitted = true;
+                            on_log(label.to_string());
+                        }
+                    } else if let Some(key) = spinner_key.as_deref() {
+                        on_log(spinner_log(key, label));
+                    } else {
                         on_log(label.to_string());
                     }
-                } else if label == DEVICE_CONNECT_PREP_LOG {
-                    if !device_connect_prep_emitted {
-                        device_connect_prep_emitted = true;
-                        on_log(label.to_string());
-                    }
-                } else if label == FINALIZE_LOG {
-                    if !finalize_emitted {
-                        finalize_emitted = true;
-                        on_log(label.to_string());
-                    }
-                } else if let Some(key) = spinner_key.as_deref() {
-                    on_log(spinner_log(key, label));
-                } else {
-                    on_log(label.to_string());
                 }
             }
 
             if let PlanStep::RebootAndWait { .. } = step {
                 if let Some(stage) = google_stage {
+                    on_log(format!("__GBST_STAGE_PROGRESS__|{stage}|100"));
                     on_log(google_stage_complete_log(stage));
                 }
             }
@@ -1284,27 +1615,27 @@ impl DirectAdb {
                     package,
                     path,
                     policy,
-                } => {
-                    match self.install_apk_with_pm_logged(package, path, |line| on_log(line)) {
-                        Ok(out) => {
-                            if should_show_command_output("APK 설치", out.trim()) {
-                                on_log(format!("    {}", out.trim()));
-                            }
+                } => match self.install_apk_with_pm_logged(package, path, |line| on_log(line)) {
+                    Ok(out) => {
+                        if should_show_command_output("APK 설치", out.trim()) {
+                            on_log(format!("    {}", out.trim()));
                         }
-                        Err(err) if *policy == FailurePolicy::Continue => {
-                            if should_show_recoverable_error("APK 설치", &err.to_string()) {
-                                on_log(format!("    [경고] APK 설치 실패, 계속 진행: {err}"));
-                            }
-                        }
-                        Err(err) => return Err(err),
                     }
-                }
+                    Err(err) if *policy == FailurePolicy::Continue => {
+                        if should_show_recoverable_error("APK 설치", &err.to_string()) {
+                            on_log(format!("    [경고] APK 설치 실패, 계속 진행: {err}"));
+                        }
+                    }
+                    Err(err) => return Err(err),
+                },
                 PlanStep::InstallApkCandidates {
                     package,
                     paths,
                     policy,
                 } => {
-                    match self.install_apk_candidates_with_pm_logged(package, paths, |line| on_log(line)) {
+                    match self
+                        .install_apk_candidates_with_pm_logged(package, paths, |line| on_log(line))
+                    {
                         Ok(out) => {
                             if should_show_command_output("APK 설치", out.trim()) {
                                 on_log(format!("    {}", out.trim()));
@@ -1318,17 +1649,17 @@ impl DirectAdb {
                         Err(err) => return Err(err),
                     }
                 }
-                PlanStep::Delay { seconds, policy, .. } => {
-                    match self.delay_seconds(*seconds, |line| on_log(line)) {
-                        Ok(()) => {}
-                        Err(err) if *policy == FailurePolicy::Continue => {
-                            if should_show_recoverable_error("대기", &err.to_string()) {
-                                on_log(format!("    [경고] 대기 실패, 계속 진행: {err}"));
-                            }
+                PlanStep::Delay {
+                    seconds, policy, ..
+                } => match self.delay_seconds(*seconds, |line| on_log(line)) {
+                    Ok(()) => {}
+                    Err(err) if *policy == FailurePolicy::Continue => {
+                        if should_show_recoverable_error("대기", &err.to_string()) {
+                            on_log(format!("    [경고] 대기 실패, 계속 진행: {err}"));
                         }
-                        Err(err) => return Err(err),
                     }
-                }
+                    Err(err) => return Err(err),
+                },
                 PlanStep::RebootAndWait { label, policy } => {
                     let reboot_count = reboot_count_for_step(plan.android_major, label);
                     let mut reboot_error = None;
@@ -1363,41 +1694,47 @@ impl DirectAdb {
                     permissions,
                     policy,
                     ..
-                } => {
-                    match self.grant_requested_permissions(package, permissions, |_| {}) {
-                        Ok(()) => {}
-                        Err(err) if *policy == FailurePolicy::Continue => {
-                            if should_show_recoverable_error(package, &err.to_string()) {
-                                on_log(format!("    [경고] 권한 적용 실패, 계속 진행: {err}"));
-                            }
+                } => match self.grant_requested_permissions(package, permissions, |_| {}) {
+                    Ok(()) => {}
+                    Err(err) if *policy == FailurePolicy::Continue => {
+                        if should_show_recoverable_error(package, &err.to_string()) {
+                            on_log(format!("    [경고] 권한 적용 실패, 계속 진행: {err}"));
                         }
-                        Err(err) => return Err(err),
                     }
-                }
+                    Err(err) => return Err(err),
+                },
                 PlanStep::AppOpsAllowExisting {
                     package,
                     ops,
                     policy,
                     ..
-                } => {
-                    match self.allow_existing_appops(package, ops, |_| {}) {
-                        Ok(()) => {}
-                        Err(err) if *policy == FailurePolicy::Continue => {
-                            if should_show_recoverable_error(package, &err.to_string()) {
-                                on_log(format!("    [경고] AppOps 적용 실패, 계속 진행: {err}"));
-                            }
+                } => match self.allow_existing_appops(package, ops, |_| {}) {
+                    Ok(()) => {}
+                    Err(err) if *policy == FailurePolicy::Continue => {
+                        if should_show_recoverable_error(package, &err.to_string()) {
+                            on_log(format!("    [경고] AppOps 적용 실패, 계속 진행: {err}"));
                         }
-                        Err(err) => return Err(err),
                     }
-                }
+                    Err(err) => return Err(err),
+                },
                 PlanStep::HealthCheck {
-                    packages,
-                    policy,
-                    ..
+                    packages, policy, ..
                 } => {
                     for package in packages {
                         match self.shell(&format!("pm path {package}")) {
-                            Ok(_) => {}
+                            Ok(output)
+                                if output
+                                    .lines()
+                                    .any(|line| line.trim_start().starts_with("package:")) => {}
+                            Ok(output) => {
+                                let err = GbstError::Adb(format!(
+                                    "필수 패키지 경로 확인 실패: {package}: {output}"
+                                ));
+                                if *policy == FailurePolicy::Stop {
+                                    return Err(err);
+                                }
+                                on_log(format!("    [WARN] {err}"));
+                            }
                             Err(err) if *policy == FailurePolicy::Continue => {
                                 if should_show_recoverable_error(package, &err.to_string()) {
                                     on_log(format!("    [WARN] {package}: {err}"));
@@ -1409,6 +1746,23 @@ impl DirectAdb {
                 }
             }
 
+            if count_completed_step {
+                if let Some(stage) = google_stage {
+                    stage_positions[stage as usize] =
+                        stage_positions[stage as usize].saturating_add(1);
+                    on_log(format!(
+                        "__GBST_STAGE_PROGRESS__|{stage}|{}",
+                        google_stage_progress_percent(
+                            stage_positions[stage as usize],
+                            stage_totals[stage as usize],
+                        ),
+                    ));
+                }
+            }
+            on_log(format!(
+                "__GBST_PLAN_PROGRESS__|{}|{progress_total}|0|{stage}",
+                step_index + 1
+            ));
             if should_clear_google_stage(step) {
                 google_stage = None;
             }
@@ -1416,10 +1770,12 @@ impl DirectAdb {
         Ok(())
     }
 
-    fn delay_seconds<F>(&mut self, _seconds: u64, _on_log: F) -> Result<()>
+    fn delay_seconds<F>(&mut self, seconds: u64, mut on_log: F) -> Result<()>
     where
         F: FnMut(String),
     {
+        on_log(format!("[ADB] 작업 안정화 대기: {seconds}초"));
+        std::thread::sleep(Duration::from_secs(seconds.min(180)));
         Ok(())
     }
 
@@ -1451,7 +1807,9 @@ impl DirectAdb {
 
                 match self.check_usb_state()? {
                     AdbUsbState::Ready | AdbUsbState::Recovery => Ok(()),
-                    AdbUsbState::Unauthorized => Err(GbstError::Adb(ADB_UNAUTHORIZED_GUIDE.to_string())),
+                    AdbUsbState::Unauthorized => {
+                        Err(GbstError::Adb(ADB_UNAUTHORIZED_GUIDE.to_string()))
+                    }
                     AdbUsbState::ServerBlocking => Err(GbstError::Adb(
                         "외부 adb server가 USB ADB 인터페이스를 점유 중입니다.".to_string(),
                     )),
@@ -1496,6 +1854,15 @@ impl DirectAdb {
                             continue;
                         }
                         let serial = String::from_utf8_lossy(&stdout).trim().to_string();
+                        if let Some(pinned) = self.pinned_serial.as_deref() {
+                            if serial.is_empty() || serial != pinned {
+                                return Err(GbstError::Adb(format!(
+                                    "ADB 기기 변경 감지: 최초={pinned}, 현재={serial}"
+                                )));
+                            }
+                        } else if !serial.is_empty() {
+                            self.pinned_serial = Some(serial.clone());
+                        }
                         if !serial.is_empty() {
                             self.serial = Some(serial);
                         }
@@ -1506,9 +1873,7 @@ impl DirectAdb {
                             Some(&mut bootmode_stdout as &mut dyn Write),
                             None,
                         );
-                        let bootmode = String::from_utf8_lossy(&bootmode_stdout)
-                            .trim()
-                            .to_string();
+                        let bootmode = String::from_utf8_lossy(&bootmode_stdout).trim().to_string();
                         self.cached_bootmode = Some(if bootmode == "recovery" {
                             "recovery"
                         } else {
@@ -1527,9 +1892,9 @@ impl DirectAdb {
                 }
             }
 
-            return Err(GbstError::Adb(
-                last_error.unwrap_or_else(|| "ADB USB 직접 연결 실패".to_string()),
-            ));
+            let detail = last_error.unwrap_or_else(|| "ADB USB 직접 연결 실패".to_string());
+            record_adb_diagnostic("ADB USB 직접 연결", &detail);
+            return Err(GbstError::Adb(detail));
         }
 
         Ok(self.device.as_mut().expect("ADB device cached"))
@@ -1539,6 +1904,35 @@ impl DirectAdb {
         self.device = None;
         self.serial = None;
         self.cached_bootmode = None;
+    }
+}
+
+/// Failure journal; intentionally does not store successful shell results or APK content.
+fn record_adb_diagnostic(context: &str, detail: &str) {
+    let dir = paths::diagnostic_logs_dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let path = dir.join("adb-diagnostics.log");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|delta| delta.as_secs())
+        .unwrap_or_default();
+    // Keep the diagnostic journal bounded to 5 MiB to avoid indefinite growth.
+    if path
+        .metadata()
+        .is_ok_and(|metadata| metadata.len() > 5 * 1024 * 1024)
+    {
+        let _ = std::fs::remove_file(&path);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)
+    {
+        // Errors may contain private device serials and paths: do not log shell output.
+        let safe = detail.replace('\r', " ").replace('\n', " ");
+        let _ = writeln!(file, "[{now}] {context}: {safe}");
     }
 }
 
@@ -1615,11 +2009,7 @@ struct ProgressReader<'a, R: Read> {
 }
 
 impl<'a, R: Read> ProgressReader<'a, R> {
-    fn new(
-        inner: R,
-        total: u64,
-        on_progress: &'a mut dyn FnMut(u64, u64, u8),
-    ) -> Self {
+    fn new(inner: R, total: u64, on_progress: &'a mut dyn FnMut(u64, u64, u8)) -> Self {
         Self {
             inner,
             total,
@@ -1654,6 +2044,35 @@ impl Default for DirectAdb {
     }
 }
 
+/// Explicit command assembled from fixed, application-owned paths only.
+const DWAS_KR_FULL_CLEANUP_MARKER: &str = "__DWAS_KR_FULL_CLEANUP_OK__";
+
+/// Shell command uses only the four literal developer-authorized paths.
+/// Symlink leaf guard prevents following an attacker-controlled redirected root.
+fn dwas_kr_full_cleanup_command() -> &'static str {
+    // Four explicit paths requested by the developer; no globbing, no parent
+    // directory deletion. Refuse a symlink at any of the four leaf paths.
+    "if [ -L /storage/self/primary/dwas_kr ] || [ -L /storage/self/primary/GBST ] || [ -L /data/local/tmp/dwas_kr ] || [ -L /data/local/tmp/GBST ]; then echo __DWAS_KR_FULL_CLEANUP_BLOCKED__; else rm -rf /storage/self/primary/dwas_kr /storage/self/primary/GBST /data/local/tmp/dwas_kr /data/local/tmp/GBST 2>/dev/null; if [ -e /storage/self/primary/dwas_kr ] || [ -L /storage/self/primary/dwas_kr ] || [ -e /storage/self/primary/GBST ] || [ -L /storage/self/primary/GBST ] || [ -e /data/local/tmp/dwas_kr ] || [ -L /data/local/tmp/dwas_kr ] || [ -e /data/local/tmp/GBST ] || [ -L /data/local/tmp/GBST ]; then echo __DWAS_KR_FULL_CLEANUP_FAILED__; else echo __DWAS_KR_FULL_CLEANUP_OK__; fi; fi"
+}
+
+fn gbst_device_cleanup_command() -> &'static str {
+    // A symlink in the parent must never redirect rm into another directory.
+    "if [ -L /data/local/tmp/dwas_kr ]; then echo __GBST_CLEANUP_FAILED__; else if [ -L /data/local/tmp/dwas_kr/GBST ]; then rm -f /data/local/tmp/dwas_kr/GBST; fi; if [ -e /data/local/tmp/dwas_kr/GBST ]; then rm -rf /data/local/tmp/dwas_kr/GBST; fi; if [ -e /data/local/tmp/dwas_kr/GBST ]; then echo __GBST_CLEANUP_FAILED__; else rmdir /data/local/tmp/dwas_kr 2>/dev/null || true; echo __GBST_DEVICE_TEMP_CLEANED__; fi; fi"
+}
+
+fn sha256_of_file(path: &Path) -> Result<String> {
+    let mut reader = File::open(path)?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let len = reader.read(&mut buffer)?;
+        if len == 0 {
+            break;
+        }
+        digest.update(&buffer[..len]);
+    }
+    Ok(hex::encode(digest.finalize()))
+}
 
 pub fn ensure_adb_key() -> Result<PathBuf> {
     let _ = paths::ensure_runtime_directories();
@@ -1662,10 +2081,22 @@ pub fn ensure_adb_key() -> Result<PathBuf> {
     let lpmbox_path = paths::lpmbox_adb_key_path();
 
     if stable_path.is_file() {
-        return Ok(stable_path);
+        if is_valid_adb_private_key(&stable_path) {
+            return Ok(stable_path);
+        }
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or_default();
+        let backup = stable_path.with_extension(format!("invalid-{timestamp}.bak"));
+        std::fs::rename(&stable_path, &backup)?;
+        record_adb_diagnostic(
+            "ADB RSA key",
+            "유효하지 않은 기존 키를 별도 백업 후 재생성합니다.",
+        );
     }
 
-    if lpmbox_path.is_file() {
+    if lpmbox_path.is_file() && is_valid_adb_private_key(&lpmbox_path) {
         copy_key_pair(&lpmbox_path, &stable_path)?;
         return Ok(stable_path);
     }
@@ -1674,9 +2105,20 @@ pub fn ensure_adb_key() -> Result<PathBuf> {
     Ok(stable_path)
 }
 
+fn is_valid_adb_private_key(path: &Path) -> bool {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    rsa::RsaPrivateKey::from_pkcs8_pem(&content).is_ok()
+        || rsa::RsaPrivateKey::from_pkcs1_pem(&content).is_ok()
+}
+
 fn generate_key_pair(path: &Path) -> Result<()> {
     let parent = path.parent().ok_or_else(|| {
-        GbstError::Adb(format!("ADB key parent 경로가 없습니다: {}", path.display()))
+        GbstError::Adb(format!(
+            "ADB key parent 경로가 없습니다: {}",
+            path.display()
+        ))
     })?;
     std::fs::create_dir_all(parent)?;
 
@@ -1709,26 +2151,9 @@ fn copy_key_pair(from: &Path, to: &Path) -> Result<()> {
 
 fn prepare_adb_usb_environment() {
     let _ = paths::ensure_runtime_directories();
-    configure_stable_adb_vendor_keys();
-    terminate_adb_fastboot_processes();
-
-    if adb_server_running() {
-        let _ = kill_adb_server_direct();
-    }
-}
-
-fn configure_stable_adb_vendor_keys() {
-    let Ok(key_path) = ensure_adb_key() else {
-        return;
-    };
-
-    let Some(key_dir) = key_path.parent() else {
-        return;
-    };
-
-    unsafe {
-        std::env::set_var("ADB_VENDOR_KEYS", key_dir);
-    }
+    // ADBUSBDevice gets the key path directly; do not change global process
+    // environment or terminate other programs using the ADB server.
+    let _ = ensure_adb_key();
 }
 
 fn adb_usb_candidate_exists() -> Result<bool> {
@@ -1736,25 +2161,6 @@ fn adb_usb_candidate_exists() -> Result<bool> {
         .map_err(|err| GbstError::Adb(format!("ADB USB 기기 검색 실패: {err}")))?;
 
     Ok(!devices.is_empty())
-}
-
-pub fn terminate_adb_fastboot_processes() {
-    if cfg!(windows) {
-        let _ = hidden_command_output("taskkill", &["/F", "/IM", "adb.exe"]);
-        let _ = hidden_command_output("taskkill", &["/F", "/IM", "fastboot.exe"]);
-    }
-}
-
-fn hidden_command_output(program: &str, args: &[&str]) -> Option<Output> {
-    let mut command = Command::new(program);
-    command.args(args);
-
-    #[cfg(windows)]
-    {
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    command.output().ok()
 }
 
 pub fn adb_server_running() -> bool {
@@ -1843,6 +2249,11 @@ fn compact_pm_output(output: &str) -> String {
     }
 }
 
+/// Create a user-scoped activation command only when actually required.
+fn post_install_reenable_command(package: &str, state: &GooglePackageState) -> Option<String> {
+    (state.installed_for_user && state.disabled).then(|| format!("pm enable --user 0 {package}"))
+}
+
 fn parse_enabled_state_from_user_line(line: &str) -> Option<u32> {
     line.split_whitespace()
         .find_map(|part| part.strip_prefix("enabled="))
@@ -1899,6 +2310,17 @@ fn parse_leading_u64(value: &str) -> Option<u64> {
         .take_while(|ch| ch.is_ascii_digit())
         .collect::<String>();
     digits.parse::<u64>().ok()
+}
+
+/// Allow the human-readable phase-start message only once per Google stage.
+/// Structured percentage updates are emitted independently on every step.
+fn mark_google_stage_started(stage: u8, emitted: &mut [bool; 5]) -> bool {
+    let index = usize::from(stage);
+    if !(1..=4).contains(&stage) || emitted[index] {
+        return false;
+    }
+    emitted[index] = true;
+    true
 }
 
 fn emit_google_restore_wait_guide<F>(on_log: &mut F)
@@ -2072,7 +2494,8 @@ fn infer_google_stage(step: &PlanStep, current: Option<u8>) -> Option<u8> {
         || label.contains("요청 권한")
         || label.contains("AppOps")
         || label.contains("Global pipe key")
-        || (current.is_none() && (label.starts_with("패키지 복구:") || label.starts_with("패키지 활성화:")))
+        || (current.is_none()
+            && (label.starts_with("패키지 복구:") || label.starts_with("패키지 활성화:")))
     {
         return Some(4);
     }
@@ -2082,7 +2505,9 @@ fn infer_google_stage(step: &PlanStep, current: Option<u8>) -> Option<u8> {
 
 fn should_clear_google_stage(step: &PlanStep) -> bool {
     match step {
-        PlanStep::RebootAndWait { label, .. } => label.contains("루틴") && label.contains("완료 후 재부팅"),
+        PlanStep::RebootAndWait { label, .. } => {
+            label.contains("루틴") && label.contains("완료 후 재부팅")
+        }
         _ => false,
     }
 }
@@ -2137,13 +2562,8 @@ fn should_show_command_output(_label: &str, _output: &str) -> bool {
 }
 
 fn should_show_recoverable_error(_label: &str, error: &str) -> bool {
-    let text = error.trim();
-    !(text.is_empty()
-        || text.contains("Failure")
-        || text.contains("INSTALL_FAILED_")
-        || text.contains("ADB shell 실패")
-        || text.contains("USB Error")
-        || text.contains("Input/Output Error"))
+    // Continue-policy commands still preserve actionable failure diagnostics.
+    !error.trim().is_empty()
 }
 
 fn google_stage_totals(steps: &[PlanStep]) -> [usize; 5] {
@@ -2178,38 +2598,25 @@ fn google_stage_totals(steps: &[PlanStep]) -> [usize; 5] {
     totals
 }
 
-fn compact_progress_bar(current: usize, total: usize) -> String {
+/// The original stage totals still determine the phase percentage,
+/// but that number is now a structured GUI signal instead of a text bar.
+fn google_stage_progress_percent(current: usize, total: usize) -> u8 {
     let total = total.max(1);
     let current = current.min(total);
-    let percent = if current >= total {
-        100
-    } else {
-        ((current as f32 / total as f32) * 100.0).round() as usize
-    };
-    let total_blocks = 20usize;
-    let filled = ((percent.min(100) * total_blocks) + 50) / 100;
-    let empty = total_blocks.saturating_sub(filled);
-
-    format!("[{}{}] {}%", "█".repeat(filled), "·".repeat(empty), percent.min(100))
+    ((current as f64 * 100.0 / total as f64).round() as u8).min(100)
 }
 
-fn google_stage_progress_log(stage: u8, current: usize, total: usize) -> String {
+fn google_stage_progress_log(stage: u8, _current: usize, _total: usize) -> String {
     spinner_log(
         &format!("google_restore_{stage}"),
-        &format!(
-            "[APK] {} 구글 서비스 작업 중... ({stage}/4)",
-            compact_progress_bar(current, total),
-        ),
+        &format!("[APK] 구글 서비스 작업 중... ({stage}/4)"),
     )
 }
 
 fn google_stage_complete_log(stage: u8) -> String {
     spinner_log(
         &format!("google_restore_{stage}"),
-        &format!(
-            "[APK] {} 구글 서비스 작업 {stage}단계 완료",
-            compact_progress_bar(1, 1),
-        ),
+        &format!("[APK] 구글 서비스 작업 {stage}단계 완료"),
     )
 }
 
@@ -2239,11 +2646,8 @@ fn screen_off_timeout_display_value(raw: &str) -> String {
         return "알 수 없음".to_string();
     }
 
-    if value
-        .parse::<u64>()
-        .is_ok_and(|parsed| parsed >= i32::MAX as u64)
-    {
-        return "사용 안 함".to_string();
+    if value.parse::<u64>().is_ok_and(|parsed| parsed >= 600_000) {
+        return "화면 꺼짐 비활성화".to_string();
     }
 
     value.to_string()
@@ -2268,7 +2672,10 @@ fn reboot_session_is_ready(
         return false;
     }
 
-    match previous_boot_id.map(str::trim).filter(|value| !value.is_empty()) {
+    match previous_boot_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         Some(previous) => current_boot_id
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -2298,9 +2705,9 @@ fn parse_screen_brightness_value(output: &str) -> Option<u32> {
 }
 
 fn parse_screen_brightness_float(output: &str) -> Option<u32> {
-    for token in output.split(|ch: char| {
-        !(ch.is_ascii_digit() || ch == '.' || ch == '-' || ch == '+')
-    }) {
+    for token in
+        output.split(|ch: char| !(ch.is_ascii_digit() || ch == '.' || ch == '-' || ch == '+'))
+    {
         let token = token.trim();
         if token.is_empty() || !token.contains('.') {
             continue;
@@ -2316,12 +2723,9 @@ fn parse_screen_brightness_float(output: &str) -> Option<u32> {
     None
 }
 
-fn reboot_count_for_step(android_major: AndroidMajor, _label: &str) -> usize {
-    if android_major != AndroidMajor::Android13 {
-        return 1;
-    }
-
-    2
+fn reboot_count_for_step(_android_major: AndroidMajor, _label: &str) -> usize {
+    // One verified reboot at every plan boundary on Android 13-17.
+    1
 }
 
 fn spinner_log(key: &str, message: &str) -> String {
@@ -2374,9 +2778,19 @@ mod tests {
 
     #[test]
     fn screen_timeout_max_int_is_presented_as_never_without_changing_raw_value() {
-        assert_eq!(screen_off_timeout_display_value("2147483647"), "사용 안 함");
-        assert_eq!(screen_off_timeout_display_value("2147483648"), "사용 안 함");
-        assert_eq!(screen_off_timeout_display_value("600000"), "600000");
+        assert_eq!(
+            screen_off_timeout_display_value("2147483647"),
+            "화면 꺼짐 비활성화"
+        );
+        assert_eq!(
+            screen_off_timeout_display_value("2147483648"),
+            "화면 꺼짐 비활성화"
+        );
+        assert_eq!(
+            screen_off_timeout_display_value("600000"),
+            "화면 꺼짐 비활성화"
+        );
+        assert_eq!(screen_off_timeout_display_value("599999"), "599999");
         assert_eq!(screen_off_timeout_display_value("null"), "알 수 없음");
     }
 
@@ -2400,11 +2814,7 @@ mod tests {
             let mut callback = |done: u64, total: u64, percent: u8| {
                 events.push((done, total, percent));
             };
-            let mut reader = ProgressReader::new(
-                std::io::Cursor::new(input),
-                1024,
-                &mut callback,
-            );
+            let mut reader = ProgressReader::new(std::io::Cursor::new(input), 1024, &mut callback);
             let mut sink = Vec::new();
             std::io::copy(&mut reader, &mut sink).unwrap();
         }
@@ -2429,9 +2839,18 @@ mod tests {
 
     #[test]
     fn reuses_existing_package_only_when_device_version_is_not_older() {
-        assert!(should_reuse_existing_package(Some(263232029), Some(263232029)));
-        assert!(should_reuse_existing_package(Some(263232030), Some(263232029)));
-        assert!(!should_reuse_existing_package(Some(263232028), Some(263232029)));
+        assert!(should_reuse_existing_package(
+            Some(263232029),
+            Some(263232029)
+        ));
+        assert!(should_reuse_existing_package(
+            Some(263232030),
+            Some(263232029)
+        ));
+        assert!(!should_reuse_existing_package(
+            Some(263232028),
+            Some(263232029)
+        ));
         assert!(!should_reuse_existing_package(None, Some(263232029)));
         assert!(!should_reuse_existing_package(Some(263232029), None));
     }
@@ -2455,7 +2874,83 @@ mod tests {
     }
 
     #[test]
-    fn android13_reboot_count_is_fixed_at_two_for_every_reboot_step() {
+    fn full_dwas_kr_cleanup_targets_only_requested_dirs() {
+        let command = dwas_kr_full_cleanup_command();
+        const CLEANUP_DIRS: [&str; 4] = [
+            "/storage/self/primary/dwas_kr",
+            "/storage/self/primary/GBST",
+            "/data/local/tmp/dwas_kr",
+            "/data/local/tmp/GBST",
+        ];
+        for path in CLEANUP_DIRS {
+            assert!(command.contains(path));
+            assert!(command.contains(&format!("[ -L {path} ]")));
+            assert!(command.contains(&format!("[ -e {path} ]")));
+        }
+        let deletion = command
+            .split_once("else rm -rf ")
+            .unwrap()
+            .1
+            .split_once(" 2>/dev/null")
+            .unwrap()
+            .0;
+        assert_eq!(
+            deletion.split_whitespace().collect::<Vec<_>>(),
+            CLEANUP_DIRS.to_vec()
+        );
+        assert!(command.contains(DWAS_KR_FULL_CLEANUP_MARKER));
+        assert!(!command.contains("/storage/self/primary/Download"));
+        assert!(!command.contains("rm -rf /data/local/tmp;"));
+        assert!(!command.contains("rm -rf /storage/self/primary;"));
+    }
+
+    #[test]
+    fn cleanup_command_is_scoped_to_owned_gbst_directory() {
+        let command = gbst_device_cleanup_command();
+        assert!(command.contains(GBST_DEVICE_TEMP_DIR));
+        assert!(command.contains("rm -rf /data/local/tmp/dwas_kr/GBST"));
+        assert!(command.contains("rmdir /data/local/tmp/dwas_kr"));
+        assert!(command.contains("__GBST_DEVICE_TEMP_CLEANED__"));
+        assert!(!command.contains("rm -rf /data/local/tmp/dwas_kr;"));
+        assert!(!command.contains("rm -rf /data/local/tmp/gbst"));
+        assert!(!command.contains("/storage/self/primary/Download"));
+    }
+
+    #[test]
+    fn local_sha256_file_hash_matches_known_digest() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("gbst-adb-sha256-{}-{}", std::process::id(), unique));
+        std::fs::write(&path, b"abc").unwrap();
+        assert_eq!(
+            sha256_of_file(&path).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn cancel_signal_stops_before_the_next_adb_step() {
+        let plan = InstallPlan {
+            android_major: AndroidMajor::Android16,
+            steps: vec![PlanStep::Delay {
+                label: "test delay".into(),
+                seconds: 1,
+                policy: FailurePolicy::Stop,
+            }],
+        };
+        let cancelled = AtomicBool::new(true);
+        let mut adb = DirectAdb::new();
+        let result = adb.execute_plan_interruptible(&plan, &cancelled, |_| {});
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("중단"));
+    }
+
+    #[test]
+    fn all_android_versions_reboot_once_at_each_plan_boundary() {
         for label in [
             "사전 준비 재부팅",
             "Google 서비스 복구 루틴 1 완료 후 재부팅",
@@ -2463,8 +2958,95 @@ mod tests {
             "Google 서비스 복구 루틴 3 완료 후 재부팅",
             "Google 서비스 복구 루틴 4 완료 후 재부팅",
         ] {
-            assert_eq!(reboot_count_for_step(AndroidMajor::Android13, label), 2);
+            assert_eq!(reboot_count_for_step(AndroidMajor::Android13, label), 1);
         }
-        assert_eq!(reboot_count_for_step(AndroidMajor::Android14, "Google 서비스 복구 루틴 1 완료 후 재부팅"), 1);
+        assert_eq!(
+            reboot_count_for_step(
+                AndroidMajor::Android14,
+                "Google 서비스 복구 루틴 1 완료 후 재부팅"
+            ),
+            1
+        );
+    }
+}
+
+#[cfg(test)]
+mod ltbox_style_progress_tests {
+    use super::*;
+    #[test]
+    fn each_google_stage_emits_one_text_start_while_progress_remains_independent() {
+        let mut emitted = [false; 5];
+        let mut visible_starts = Vec::new();
+        for stage in [1, 1, 1, 2, 2, 3, 3, 3, 4, 4, 4] {
+            if mark_google_stage_started(stage, &mut emitted) {
+                visible_starts.push(google_stage_progress_log(stage, 0, 10));
+            }
+        }
+        assert_eq!(visible_starts.len(), 4);
+        for (index, text) in visible_starts.iter().enumerate() {
+            assert!(text.contains(&format!("({}/4)", index + 1)));
+        }
+        assert!(!mark_google_stage_started(0, &mut emitted));
+        assert!(!mark_google_stage_started(4, &mut emitted));
+        assert_eq!(google_stage_progress_percent(5, 10), 50);
+    }
+
+    #[test]
+    fn stage_progress_has_no_textual_unicode_blocks() {
+        assert_eq!(google_stage_progress_percent(1, 4), 25);
+        assert_eq!(google_stage_progress_percent(4, 4), 100);
+        assert_eq!(google_stage_progress_percent(10, 4), 100);
+        assert_eq!(google_stage_progress_percent(0, 0), 0);
+        let stage = google_stage_progress_log(2, 1, 4);
+        let completed = google_stage_complete_log(2);
+        assert!(stage.contains("2/4"));
+        assert!(completed.contains("2단계 완료"));
+        assert!(!stage.contains('█') && !stage.contains('·'));
+        assert!(!completed.contains('█') && !completed.contains('·'));
+    }
+}
+
+#[cfg(test)]
+mod gsf_post_install_recovery_tests {
+    use super::*;
+
+    fn state(installed_for_user: bool, disabled: bool) -> GooglePackageState {
+        GooglePackageState {
+            installed_for_user,
+            disabled,
+            version_code: Some(33),
+        }
+    }
+
+    #[test]
+    fn postflight_only_enables_disabled_packages_for_user_zero() {
+        let gsf = "com.google.android.gsf";
+        assert_eq!(
+            post_install_reenable_command(gsf, &state(true, true)),
+            Some("pm enable --user 0 com.google.android.gsf".to_string()),
+        );
+        assert!(post_install_reenable_command(gsf, &state(true, false)).is_none());
+        assert!(post_install_reenable_command(gsf, &state(false, true)).is_none());
+    }
+
+    #[test]
+    fn reproduces_disabled_user_zero_from_tb128fu_android13() {
+        // Captured from the read-only package inspection after the failed run.
+        let gsf_line =
+            "User 0: installed=true hidden=false suspended=false enabled=2 instant=false";
+        let enabled_line =
+            "User 0: installed=true hidden=false suspended=false enabled=1 instant=false";
+        assert_eq!(parse_enabled_state_from_user_line(gsf_line), Some(2));
+        assert_eq!(parse_enabled_state_from_user_line(enabled_line), Some(1));
+        assert!(
+            post_install_reenable_command(
+                "com.google.android.gsf",
+                &state(
+                    true,
+                    parse_enabled_state_from_user_line(gsf_line) == Some(2)
+                ),
+            )
+            .is_some()
+        );
     }
 }

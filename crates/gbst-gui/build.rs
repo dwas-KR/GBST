@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 #[cfg(target_os = "windows")]
 fn main() {
     let mut resource = winresource::WindowsResource::new();

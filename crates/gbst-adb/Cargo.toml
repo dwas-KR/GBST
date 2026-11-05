@@ -8,3 +8,5 @@ license.workspace = true
 gbst-core = { path = "../gbst-core" }
 adb_client.workspace = true
 rsa.workspace = true
+sha2.workspace = true
+hex.workspace = true

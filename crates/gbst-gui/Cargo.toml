@@ -13,6 +13,7 @@ gbst-core = { path = "../gbst-core" }
 gbst-adb = { path = "../gbst-adb" }
 anyhow.workspace = true
 iced.workspace = true
+tokio.workspace = true
 image.workspace = true
 chrono.workspace = true
 open.workspace = true

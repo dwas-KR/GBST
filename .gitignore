@@ -1,6 +1,11 @@
 # Rust build files
 /target/
 
+# Generated Cargo metadata in the patched vendor crate
+/vendor/adb_client/.cargo-ok
+/vendor/adb_client/.cargo_vcs_info.json
+/vendor/adb_client/Cargo.lock
+
 # Build output
 /build/
 /dist/

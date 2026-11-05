@@ -1,54 +1,33 @@
 # GBST (Google Basic Service Tool)
-**GBST is designed to help Lenovo tablet users set up Google Basic Services more easily and conveniently.**
-Instead of manually checking device information, preparing APK files, or running complex ADB commands, users can complete the entire process through a simple dashboard-based interface.
-<img width="1650" height="632" alt="GBST_" src="https://github.com/user-attachments/assets/c7e9a5c4-d9cb-4f91-bea6-92204b0299da" />
-GBST was developed with reference to LPMBox.
-Reference project: https://github.com/dwas-KR/LPMBox/tree/main
+GBST is a Windows tool for installing, repairing, and updating Google services on Lenovo Android tablets.
+It simplifies the process with a user-friendly interface, eliminating the need for manual ADB commands.
 
-## Supported Languages
-* English (en) / 한국어 (ko) / Русский (ru) / 日本語 (jp)
-* 繁體中文 (CN/TW) / Tiếng Việt (vi) / Ελληνικά (el) / हिन्दी (hi)
-* ქართული (ka) / Nederlands (nl) / العربية (ar) / Español (es)
+![GBST](https://github.com/user-attachments/assets/c7e9a5c4-d9cb-4f91-bea6-92204b0299da)
 
-## APK Source and File Integrity
-The APK files used by GBST are obtained through the following process:
-1. The original APK files are downloaded from **APKMirror**.
-2. The unmodified APK files are published as assets in the public **GBST-APK GitHub Release**.
-3. GBST reads a plain-text `GBST_apk.txt` catalog and downloads the matching GitHub Release assets for the connected Android version. No Base64 decoding is used for the APK catalog. The same public catalog is also bundled with the source as a fallback.
-4. Downloaded APK files are cached under `%LOCALAPPDATA%\dwas_kr\GBST\apk\Android <version>` and reused after package validation.
-The APK files provided through GBST are stored and distributed **without modification, patching, malware injection, or other alterations**.
-GBST does not rebuild, re-sign, or modify the original APK packages downloaded from APKMirror.
+Developed with reference to [LPMBox](https://github.com/dwas-KR/LPMBox).
 
-## How to Use GBST
-1. Connect your Lenovo Android tablet to your PC using a USB data cable.
-2. Enable USB debugging on the tablet:
-   * Open **Settings**.
-   * Select **About Tablet** at the bottom of the left-hand menu.
-   * Scroll down on the right and quickly tap **Software Version** 10 times.
-   * Developer mode is enabled when a developer notification appears.
-   * Select **General Settings** from the left-hand menu.
-   * Scroll to the bottom of the right-hand menu and open **Developer Options**.
-   * Enable **USB Debugging**.
-3. When the USB debugging authorization prompt appears on the tablet, tap **Allow**.
-4. Wait for GBST to finish downloading the required APK files.
-5. After the download is complete, click **Start** in the **Google Services Install/Repair/Update** section.
-6. Do not disconnect the tablet from the PC until the task is complete. Refer to the logs for detailed progress and results.
+## 🌐Supported Languages
+- English, 한국어, Русский, 日本語
+- 繁體中文, Tiếng Việt, Ελληνικά, हिन्दी
+- ქართული, Nederlands, العربية, Español
 
-## Sidebar Menu
-The sidebar provides quick access to the main areas of the program:
-* **Dashboard:** View the connected device status and start the main workflow.
-* **Start Google Task:** Start the Google Basic Services installation, repair, and update workflow.
-* **Log Management:** Review task progress and result logs.
-* **Settings:** Change the language, check for program updates, submit feedback, and access developer links.
+## APK Sources
+[GBST APK](https://github.com/dwas-KR/GBST-APK)
 
-## Logs
-GBST records the progress and results of each step while a task is running.
-The logs can help identify issues such as:
+GBST uses original APK files from APKMirror, hosted through the public GBST-APK GitHub Releases.
 
-* USB debugging authorization problems
-* File download issues
-* Device connection or detection problems
-* Errors that occur during the workflow
+All APKs are distributed without modification. Files are downloaded based on the connected device's Android version and cached for future use.
 
+## How to Use
+1. Connect your Lenovo tablet to your PC with a USB data cable.
+2. Enable **Developer Options** by tapping **Software Version** 10 times in **Settings → About Tablet**.
+3. Go to **Settings → General Settings → Developer Options** and enable **USB Debugging**.
+4. Allow USB debugging when prompted on your tablet.
+5. Open GBST, download the required APKs, and start the Google services task.
+6. Keep the tablet connected until the process finishes.
 
-
+## Main Features
+- **Dashboard:** View device information and Google services status.
+- **Google Services:** Install, repair, or update Google services.
+- **Logs:** Check task progress and errors.
+- **Settings:** Manage language, updates, and other preferences.

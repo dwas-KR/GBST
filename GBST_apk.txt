@@ -1,0 +1,59 @@
+# Android 13
+com.google.android.printservice.recommendation: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.printservice.recommendation_1.3.0-android-13.apk
+com.google.android.onetimeinitializer: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.onetimeinitializer_13-android-13.apk
+com.google.android.configupdater_1: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.configupdater_36.0.4-android-7.1-16.apk
+com.google.android.configupdater_2: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.configupdater_36.0.6-android-7.1-16.apk
+com.google.android.partnersetup_1: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.partnersetup_100.740061114-android-9-16.apk
+com.google.android.partnersetup_2: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.partnersetup_100.773392826-android-8-16.apk
+com.google.android.gms: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.gms_26.32.32-android-12-17.apk
+com.google.android.gsf: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.gsf_13-android-13.apk
+com.android.vending: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.android.vending_52.9.21-android-12-17.apk
+
+# Android 14
+com.google.android.printservice.recommendation: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.printservice.recommendation_1.3.0-android-14.apk
+com.google.android.onetimeinitializer: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.onetimeinitializer_14-android-14.apk
+com.google.android.configupdater_1: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.configupdater_36.0.4-android-7.1-16.apk
+com.google.android.configupdater_2: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.configupdater_36.0.6-android-7.1-16.apk
+com.google.android.partnersetup_1: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.partnersetup_100.740061114-android-9-16.apk
+com.google.android.partnersetup_2: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.partnersetup_100.773392826-android-8-16.apk
+com.google.android.gms: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.gms_26.32.32-android-12-17.apk
+com.google.android.gsf: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.gsf_14-android-14.apk
+com.android.vending: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.android.vending_52.9.21-android-12-17.apk
+
+# Android 15
+com.google.android.printservice.recommendation: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.printservice.recommendation_1.3.0-android-15.apk
+com.google.android.onetimeinitializer: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.onetimeinitializer_15-android-15.apk
+com.google.android.configupdater_1: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.configupdater_36.0.4-android-7.1-16.apk
+com.google.android.configupdater_2: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.configupdater_36.0.6-android-7.1-16.apk
+com.google.android.partnersetup_1: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.partnersetup_100.740061114-android-9-16.apk
+com.google.android.partnersetup_2: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.partnersetup_100.773392826-android-8-16.apk
+com.google.android.gms: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.gms_26.32.32-android-15-17.apk
+com.google.android.gsf: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.gsf_15-android-15.apk
+com.android.vending: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.android.vending_52.9.21-android-12-17.apk
+
+# Android 16
+com.google.android.printservice.recommendation: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.printservice.recommendation_1.3.0-android-16.apk
+com.google.android.onetimeinitializer_1: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.onetimeinitializer_16-android-16-1.apk
+com.google.android.onetimeinitializer_2: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.onetimeinitializer_16-android-16-2.apk
+com.google.android.configupdater_1: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.configupdater_36.0.4-android-7.1-16.apk
+com.google.android.configupdater_2: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.configupdater_36.0.6-android-7.1-16.apk
+com.google.android.partnersetup_1: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.partnersetup_100.740061114-android-9-16.apk
+com.google.android.partnersetup_2: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.partnersetup_100.773392826-android-8-16.apk
+com.google.android.gms: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.gms_26.32.32-android-15-17.apk
+com.google.android.gsf_1: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.gsf_16-android-16-1.apk
+com.google.android.gsf_2: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.gsf_16-android-16-2.apk
+com.android.vending: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.android.vending_52.9.21-android-12-17.apk
+
+# Android 17
+com.google.android.printservice.recommendation: O
+com.google.android.onetimeinitializer: O
+com.google.android.configupdater_1: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.configupdater_36.0.4-android-7.1-16.apk
+com.google.android.configupdater_2: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.configupdater_36.0.6-android-7.1-16.apk
+com.google.android.partnersetup_1: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.partnersetup_100.740061114-android-9-16.apk
+com.google.android.partnersetup_2: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.partnersetup_100.773392826-android-8-16.apk
+com.google.android.gms: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.gms_26.32.32-android-15-17.apk
+com.google.android.gsf_1: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.gsf_17-android-17-1.apk
+com.google.android.gsf_2: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.google.android.gsf_17-android-17-2.apk
+com.android.vending: https://github.com/dwas-KR/GBST-APK/releases/download/apk-2026.08.29/com.android.vending_52.9.21-android-12-17.apk
+
+# Android 18 (미구현 입니다)
